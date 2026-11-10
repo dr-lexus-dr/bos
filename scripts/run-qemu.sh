@@ -4,7 +4,7 @@ set -e
 ESP="${1:-target/esp}"
 OVMF_CODE="${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
 exec qemu-system-x86_64 \
-  -machine q35 -cpu max -smp 4 -m 2G \
+  -machine q35 -cpu max -smp 4 -m 4G \
   -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
   -drive file=fat:rw:"$ESP",format=raw,if=none,id=esp \
   -device ide-hd,drive=esp,bootindex=0 \
