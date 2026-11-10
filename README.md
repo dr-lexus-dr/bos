@@ -1,67 +1,79 @@
-# bOS — Minimal Operating System
+# bOS
 
-Официальный репозиторий операционной системы bOS.
+[English](#english) · [Русский](#русский) · [How to install / Установка](docs/INSTALL.md)
 
-bOS — экспериментальная терминальная ОС для x86-64 UEFI. Ядро написано на Rust без стандартной библиотеки. Оболочка bSH работает внутри ядра. Архитектура описана в [docs/ARCH.md](docs/ARCH.md).
+## English
 
-## Загрузка в терминал
+**bOS is a small, terminal-first operating system for x86-64 UEFI.** Boot straight into bSH, explore the filesystem, edit a note, or mount a bFS volume. The Rust kernel runs without the standard library, and a fresh session starts in `/users/default` with three directories at the root: `/system`, `/users`, and `/applications`.
 
-Установи Rust через rustup, GNU tar, QEMU x86-64 и OVMF. Затем запусти из корня проекта.
+The current release is an experimental preview. The root filesystem and bFS volumes run in RAM, so changes reset on reboot. The Linux tools ship as separate programs.
+
+### Build and run
+
+On Linux, install Rust via rustup, GNU tar, QEMU x86-64, and OVMF. To build ISO images, also install Python 3 with `pycdlib`, `dosfstools`, and `mtools`. The Rust version and targets come from `rust-toolchain.toml`.
 
 ```sh
-bash scripts/build.sh
+bash scripts/build.sh --release
 bash scripts/run-qemu.sh
 ```
 
-Версия Rust nightly и целевые платформы указаны в `rust-toolchain.toml`.
-Путь к прошивке можно задать через `OVMF_CODE`.
-
-bSH запускается в домашнем каталоге `/users/default`. Команда `cd` без аргументов возвращает туда.
-
-```text
-whoami
-pwd
-help
-ls /
-cd /users/default/documents
-echo "First line" > notes.txt
-edit -a notes.txt
-```
-
-Консоль принимает команды в ASCII. Например, введите `Second line` в
-редакторе, затем `.save`. Команда `.quit` отменяет ввод. Без `-a` редактор
-заменяет содержимое при сохранении. Для просмотра используйте `cat notes.txt`.
-
-При загрузке в корне bOS есть три каталога.
-
-```text
-/
-├── system/                 системные файлы
-│   ├── logs/
-│   ├── mounts/
-│   └── tmp/
-├── users/
-│   └── default/            домашняя папка пользователя
-│       ├── downloads/
-│       ├── documents/      здесь лежит notes.txt
-│       ├── pictures/
-│       ├── music/
-│       └── videos/
-└── applications/           приложения
-```
-
-Корень использует ramfs. Дополнительный том bFS можно подключить командой
-`mount ramdisk /system/mounts/data bFS`. Начальные файлы загружаются из initrd,
-а изменения в RAM пропадают после перезагрузки.
-
-Загрузочный UEFI ISO можно собрать из того же ESP с помощью `mkfs.vfat`,
-`mtools` и Python-пакета `pycdlib`.
+Set `OVMF_CODE` if the firmware is installed at a different path. For the ISO images, use the same build output:
 
 ```sh
 python3 scripts/mkiso.py
+python3 scripts/mkiso.py --install
 ```
 
-Результат — `target/bos-live.iso`. Каталог `target/` и данные пользователей исключены из Git. Пустой `notes.txt` создаётся при загрузке.
+The outputs are `target/bos-live.iso` and `target/bos-install.iso`. Boot the **Live ISO** as a UEFI CD-ROM. The **Install ISO** includes a Linux script for installing bOS onto a dedicated drive. See the [installation guide](docs/INSTALL.md).
+
+### First commands
+
+```text
+help
+whoami
+pwd
+ls /
+cd documents
+edit -a notes.txt
+```
+
+Type a line in the editor, then `.save` to write it or `.quit` to discard it. Run `cat notes.txt` to read the file. Use `cd` to return home.
+
+## Русский
+
+**bOS — компактная терминальная операционная система для x86-64 UEFI.** После загрузки открывается bSH, где можно работать с файлами, редактировать заметки и подключать тома bFS. Ядро написано на Rust без стандартной библиотеки. Сеанс начинается в `/users/default`, а в корне находятся три каталога.
+
+```text
+/
+├── system/         журналы, временные файлы и точки монтирования
+├── users/
+│   └── default/    documents, downloads, pictures, music, videos
+└── applications/   приложения
+```
+
+Это экспериментальный выпуск. Корневая файловая система и тома bFS работают в RAM. Изменения сбрасываются после перезагрузки. Утилиты для Linux собираются отдельно.
+
+### Сборка и запуск
+
+На Linux установите Rust через rustup, GNU tar, QEMU x86-64 и OVMF. Для сборки ISO также понадобятся Python 3 с пакетом `pycdlib`, `dosfstools` и `mtools`. Версия Rust и целевые платформы указаны в `rust-toolchain.toml`.
+
+```sh
+bash scripts/build.sh --release
+bash scripts/run-qemu.sh
+```
+
+Если OVMF установлен по другому пути, задайте его через `OVMF_CODE`. Чтобы собрать оба образа:
+
+```sh
+python3 scripts/mkiso.py
+python3 scripts/mkiso.py --install
+```
+
+Образы появятся в `target/bos-live.iso` и `target/bos-install.iso`. **Live ISO** загружается как UEFI CD-ROM. **Install ISO** содержит скрипт для установки на отдельный накопитель из Linux. См. [инструкцию по установке](docs/INSTALL.md).
+
+В bSH попробуйте `help`, `whoami`, `pwd` и `ls /`. Для записи заметки откройте `edit -a documents/notes.txt`, введите текст и завершите командой `.save`. Команда `cd` возвращает в домашний каталог.
+
+Подробнее об устройстве системы см. в [описании архитектуры](docs/ARCH.md).
 
 ## Инструменты для Linux
 
