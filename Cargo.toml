@@ -8,7 +8,7 @@ members = [
     "userspace/init",
     "userspace/shell",
     "userspace/coreutils",
-    "userspace/bpm",
+    "userspace/bpt",
     "userspace/bnet",
     "userspace/btext",
     "compat/win32",
@@ -45,7 +45,7 @@ uuid = { version = "=1.6.0", default-features = false, features = ["serde"] }
 alloc = { version = "1.0", features = ["alloc"] }
 compiler_builtins = { version = "0.1", features = ["mem"] }
 
-# Host userspace tools (bpm, bnet)
+# Host userspace tools (bpt, bnet)
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls-webpki-roots"] }
 anyhow = "1.0"
 tar = "0.4"

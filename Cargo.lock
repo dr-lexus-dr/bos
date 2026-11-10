@@ -136,17 +136,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "bpm"
+name = "bpt"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "flate2",
+ "percent-encoding",
  "reqwest",
  "serde",
  "serde_json",
  "sha2",
  "tar",
  "toml",
+ "url",
 ]
 
 [[package]]

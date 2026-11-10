@@ -9,7 +9,7 @@ mkdir -p applications system/{logs,mounts,tmp} \
 echo "Starting bOS-like operating system..."
 echo "Root structure: system users applications"
 echo "Tools:"
-echo "  system/bpm           package manager (github.com/bOS-operating-system/bos-repository)"
+echo "  system/bpt           package manager (~BPT-PROGS)"
 echo "  system/network       internet support"
 echo "  system/text-editor   standard text editor (btext)"
 echo "$(date -u +%FT%TZ) bOS init: structure ready" >> system/logs/system.log

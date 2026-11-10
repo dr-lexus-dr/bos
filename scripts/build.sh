@@ -144,7 +144,7 @@ if [[ "$SKIP_BOOTLOADER" -eq 0 || "$SKIP_KERNEL" -eq 0 || "$SKIP_INITRD" -eq 0 ]
         tar --format=ustar --mtime=@0 --owner=0 --group=0 \
             -cf "$ESP/EFI/bOS/initrd.img" \
             applications/calculator.sh applications/notepad.sh \
-            system/init.sh system/bpm system/network system/text-editor \
+            system/init.sh system/bpt system/bpm system/network system/text-editor \
             users/default/.profile
     fi
 

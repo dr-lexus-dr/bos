@@ -1,0 +1,13 @@
+#!/bin/bash
+# bpt — bOS package manager launcher.
+# Launch the Linux build of bPT.
+PROJECT="$(cd "$(dirname "$0")/.." && pwd)"
+export BOS_ROOT="${BOS_ROOT:-$PROJECT}"
+for bin in "$PROJECT/target/release/bpt" "$PROJECT/target/debug/bpt"; do
+    if [ -x "$bin" ]; then
+        exec "$bin" "$@"
+    fi
+done
+echo "bpt: binary not built yet. Run: cargo +stable build -p bpt" >&2
+echo "     usage: bpt help" >&2
+exit 1

@@ -1,0 +1,24 @@
+{
+  "packages": [
+    {
+      "name": "hello",
+      "version": "1.0.0",
+      "description": "Print a greeting from bPT",
+      "category": "utilities",
+      "repo": "dr-lexus-dr/bos",
+      "ref": "bpt-v0.1.0",
+      "path": "~BPT-PROGS/hello",
+      "bin": ["hello.sh"]
+    },
+    {
+      "name": "sysinfo",
+      "version": "1.0.0",
+      "description": "Show the Linux host kernel and architecture",
+      "category": "utilities",
+      "repo": "dr-lexus-dr/bos",
+      "ref": "bpt-v0.1.0",
+      "path": "~BPT-PROGS/sysinfo",
+      "bin": ["sysinfo.sh"]
+    }
+  ]
+}

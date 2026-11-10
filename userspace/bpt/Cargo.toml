@@ -1,10 +1,11 @@
 [package]
-name = "bpm"
+name = "bpt"
 version = "0.1.0"
 edition = "2021"
-description = "bOS Package Manager - installs packages from GitHub"
+description = "BPT package manager - installs packages from GitHub"
 
 [dependencies]
+url = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 reqwest = { workspace = true, features = ["json"] }
@@ -13,3 +14,4 @@ toml = { workspace = true }
 sha2 = { workspace = true }
 flate2 = { workspace = true }
 tar = { workspace = true }
+percent-encoding = "2.3"

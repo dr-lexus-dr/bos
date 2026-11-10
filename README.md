@@ -1,5 +1,11 @@
 # bOS
 
+**bSH · bFS · bPT**
+
+*Boot to a shell. Work with files. Manage GitHub packages with bPT.*
+
+*Загрузитесь в оболочку. Работайте с файлами. Управляйте пакетами GitHub через bPT.*
+
 [English](#english) · [Русский](#русский) · [How to install / Установка](docs/INSTALL.md)
 
 ## English
@@ -81,61 +87,23 @@ python3 scripts/mkiso.py --install
 загрузки bOS использует встроенную оболочку `bSH`. Запуск пользовательских
 процессов и сетевой стек внутри bOS пока в разработке.
 
-## Package manager — `bpm`
+## bPT · bOS Package Tool
 
-Installs applications from the official repository:
-**https://github.com/bOS-operating-system/bos-repository**
+**From a GitHub file to an installed package in one command.** bPT 0.1.0 is a Linux-host package manager for the bOS workspace. It offers an APT-style command line for the [official catalog](~BPT-PROGS/registry.json) and can install a regular file, directory or repository directly from public GitHub sources.
 
-```
-system/bpm update                 # refresh the registry from GitHub
-system/bpm list                   # list available packages
-system/bpm search <query>         # search name/description/category
-system/bpm info <name>            # package details
-system/bpm install <name>         # install into applications/
-system/bpm install owner/repo     # ...or directly from any GitHub repo
-system/bpm remove <name>          # uninstall
-system/bpm installed              # list installed packages
-system/bpm upgrade [name...]      # update installed packages
-```
+**От файла на GitHub до установленной программы одной командой.** bPT 0.1.0 запускается в Linux и устанавливает пакеты в каталог `applications/` проекта bOS. В [`~BPT-PROGS/`](~BPT-PROGS/) находятся официальный индекс и первые программы.
 
-The official repository exposes a JSON index at its root, `registry.json`:
-
-```json
-{
-  "packages": [
-    {
-      "name": "calculator",
-      "version": "1.0.0",
-      "description": "Simple calculator",
-      "category": "utilities",
-      "repo": "bOS-operating-system/bos-apps",
-      "ref": "main",
-      "path": "packages/calculator",
-      "sha256": "optional tarball checksum",
-      "bin": ["calculator.sh"],
-      "license": "MIT",
-      "homepage": "https://example.com",
-      "requires": []
-    }
-  ]
-}
+```sh
+cargo +stable build --locked --release -p bpt
+system/bpt update
+system/bpt search hello
+system/bpt install hello
+applications/hello/hello.sh
+system/bpt install https://github.com/dr-lexus-dr/bos/blob/v0.1.0/docs/INSTALL.md
+system/bpt list --installed
 ```
 
-- `repo` — GitHub `owner/repo` (packages may live in the official repository
-  itself or in any other repository)
-- `ref` — branch, tag or commit (default `main`)
-- `path` — directory inside the repository (default `.` = whole repository)
-- `bin` — files to mark executable after install
-- `requires` — package names installed automatically first
-
-Installed packages land in `applications/<name>`, the install database lives in
-`system/bpm/installed.json`, the registry cache in `system/bpm/cache/`, and all
-operations are logged to `system/logs/bpm.log`.
-
-Environment: `BOS_ROOT` (bOS root, auto-detected), `BPM_REGISTRY`
-(registry.json URL override).
-
-Build: `cargo +stable build -p bpm` (sources in `userspace/bpm/`).
+Supported commands include `update`, `list`, `search`, `show`, `install`, `reinstall`, `upgrade`, `remove`, `autoremove`, `depends`, `check`, `download` and `clean`. See the [bPT guide / руководство по bPT](docs/BPT.md) for the catalog format and current limits.
 
 ## Text editor — `btext`
 
@@ -174,7 +142,7 @@ Build: `cargo build -p bnet` (sources in `userspace/bnet/`).
 ## Сборка утилит для Linux
 
 ```sh
-cargo +stable build -p bpm -p bnet -p btext
+cargo +stable build -p bpt -p bnet -p btext
 ```
 
 ## Шрифт консоли
