@@ -11,8 +11,21 @@ use spin::Mutex;
 use bloader_shared::{FramebufferInfo, PixelFormat};
 
 const FMT_NONE: u8 = 0;
-const FMT_RGB: u8 = 1; // 0x00RRGGBB
-const FMT_BGR: u8 = 2; // 0x00BBGGRR
+const FMT_RGB: u8 = 1; // RGB byte order, little-endian word 0x00BBGGRR
+const FMT_BGR: u8 = 2; // BGR byte order, little-endian word 0x00RRGGBB
+
+const PALETTE: [u32; 16] = [
+    0x000000, 0xaa0000, 0x00aa00, 0xaa5500, 0x0000aa, 0xaa00aa, 0x00aaaa, 0xaaaaaa,
+    0x555555, 0xff5555, 0x55ff55, 0xffff55, 0x5555ff, 0xff55ff, 0x55ffff, 0xffffff,
+];
+
+#[derive(Default)]
+enum Escape {
+    #[default]
+    Text,
+    Start,
+    Csi { params: [u8; 8], index: usize, invalid: bool },
+}
 
 struct Fb {
     base: u64,
@@ -22,6 +35,9 @@ struct Fb {
     fmt: u8,
     x: u32, // cursor cell
     y: u32,
+    fg: u32,
+    bg: u32,
+    escape: Escape,
 }
 
 static FB: Mutex<Fb> = Mutex::new(Fb {
@@ -32,6 +48,9 @@ static FB: Mutex<Fb> = Mutex::new(Fb {
     fmt: FMT_NONE,
     x: 0,
     y: 0,
+    fg: 0xffffff,
+    bg: 0,
+    escape: Escape::Text,
 });
 
 // Re-exported for bSH diagnostics.
@@ -108,8 +127,8 @@ pub fn print(s: &str) {
         return;
     }
     let mut fb = FB.lock();
-    for b in s.bytes() {
-        putc(&mut fb, b);
+    for ch in s.chars() {
+        putc(&mut fb, ch);
     }
 }
 
@@ -143,26 +162,86 @@ pub fn clear() {
 }
 
 fn clear_fb() {
-    let (base, stride, height) = {
-        let s = FB.lock();
-        (s.base, s.stride, s.height)
-    };
-    unsafe {
-        core::ptr::write_bytes(base as *mut u32, 0, (stride as usize) * (height as usize));
+    let fb = FB.lock();
+    fill(fb.base as *mut u32, fb.stride as usize * fb.height as usize, fb.pixel(fb.bg));
+}
+
+impl Fb {
+    fn pixel(&self, rgb: u32) -> u32 {
+        if self.fmt == FMT_RGB {
+            (rgb & 0x00ff00) | ((rgb & 0xff0000) >> 16) | ((rgb & 0x0000ff) << 16)
+        } else {
+            rgb
+        }
+    }
+
+    fn sgr(&mut self, params: &[u8]) {
+        let mut params = params.iter().copied();
+        while let Some(code) = params.next() {
+            match code {
+                0 => {
+                    self.fg = 0xffffff;
+                    self.bg = 0;
+                }
+                30..=37 => self.fg = PALETTE[(code - 30) as usize],
+                39 => self.fg = 0xffffff,
+                40..=47 => self.bg = PALETTE[(code - 40) as usize],
+                49 => self.bg = 0,
+                90..=97 => self.fg = PALETTE[(code - 90 + 8) as usize],
+                100..=107 => self.bg = PALETTE[(code - 100 + 8) as usize],
+                38 | 48 => match params.next() {
+                    Some(2) => { params.by_ref().take(3).for_each(drop); }
+                    Some(5) => { params.next(); }
+                    _ => break,
+                },
+                _ => {}
+            }
+        }
     }
 }
 
-fn putc(fb: &mut Fb, b: u8) {
+fn putc(fb: &mut Fb, ch: char) {
+    if ch == '\x1b' {
+        fb.escape = Escape::Start;
+        return;
+    }
+    match core::mem::take(&mut fb.escape) {
+        Escape::Start if ch == '[' => {
+            fb.escape = Escape::Csi { params: [0; 8], index: 0, invalid: false };
+            return;
+        }
+        Escape::Csi { mut params, mut index, mut invalid } => match ch {
+            '@'..='~' => {
+                if ch == 'm' && !invalid {
+                    fb.sgr(&params[..=index]);
+                }
+                return;
+            }
+            ' '..='?' => {
+                match ch {
+                    '0'..='9' => {
+                        params[index] = params[index].saturating_mul(10).saturating_add(ch as u8 - b'0');
+                    }
+                    ';' if index + 1 < params.len() => index += 1,
+                    _ => invalid = true,
+                }
+                fb.escape = Escape::Csi { params, index, invalid };
+                return;
+            }
+            _ => {}
+        },
+        _ => {}
+    }
     let cols = fb.width / 8;
     let rows = fb.height / 16;
-    match b {
-        b'\n' => {
+    match ch {
+        '\n' => {
             fb.x = 0;
             fb.y += 1;
         }
-        b'\r' => fb.x = 0,
-        b'\t' => fb.x = (fb.x + 8) & !7,
-        0x08 => {
+        '\r' => fb.x = 0,
+        '\t' => fb.x = ((fb.x + 8) & !7).min(cols),
+        '\x08' => {
             if fb.x > 0 {
                 fb.x -= 1;
             } else if fb.y > 0 {
@@ -170,15 +249,20 @@ fn putc(fb: &mut Fb, b: u8) {
                 fb.x = cols - 1;
             }
         }
+        ch if ch.is_control() => {}
         _ => {
-            let g = if (0x20..0x7f).contains(&b) {
-                b
+            let g = if (' '..='~').contains(&ch) {
+                ch as u8
             } else {
                 b'?'
             };
             if fb.x >= cols {
                 fb.x = 0;
                 fb.y += 1;
+            }
+            if fb.y >= rows {
+                scroll(fb);
+                fb.y = rows - 1;
             }
             draw_glyph(fb, g);
             fb.x += 1;
@@ -193,12 +277,14 @@ fn putc(fb: &mut Fb, b: u8) {
 fn draw_glyph(fb: &Fb, g: u8) {
     let glyph = &super::font8x16::FONT[g as usize];
     let base = fb.base as *mut u32;
+    let fg = fb.pixel(fb.fg);
+    let bg = fb.pixel(fb.bg);
     for row in 0..16 {
         let bits = glyph[row];
         for col in 0..8 {
             let px = fb.x * 8 + col;
             let py = fb.y * 16 + row as u32;
-            let color = if bits & (0x80 >> col) == 0 { 0 } else { 0x00FF_FFFF };
+            let color = if bits & (0x80 >> col) == 0 { bg } else { fg };
             unsafe {
                 core::ptr::write_volatile(base.add((py * fb.stride + px) as usize), color);
             }
@@ -206,23 +292,19 @@ fn draw_glyph(fb: &Fb, g: u8) {
     }
 }
 
-fn scroll(fb: &mut Fb) {
-    let row_words = fb.stride as usize;
-    let row_bytes = row_words * 4;
-    let base = fb.base as *mut u8;
+fn fill(base: *mut u32, words: usize, color: u32) {
+    for index in 0..words {
+        unsafe { base.add(index).write_volatile(color); }
+    }
+}
+
+fn scroll(fb: &Fb) {
+    let row_words = fb.stride as usize * 16;
+    let visible_words = row_words * (fb.height / 16) as usize;
+    let base = fb.base as *mut u32;
     unsafe {
-        // Move rows 1..N up by one text row (16 px).
-        core::ptr::copy(
-            base.add(row_bytes * 16),
-            base,
-            row_bytes * (fb.height as usize - 16),
-        );
-        // Clear the last text row.
-        core::ptr::write_bytes(
-            base.add(row_bytes * (fb.height as usize - 16)),
-            0,
-            row_bytes * 16,
-        );
+        core::ptr::copy(base.add(row_words), base, visible_words - row_words);
+        fill(base.add(visible_words - row_words), row_words, fb.pixel(fb.bg));
     }
 }
 

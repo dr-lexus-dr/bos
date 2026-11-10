@@ -1,6 +1,6 @@
 [package]
 name = "bos_kernel"
-version = "0.2.0"
+version = "0.5.0"
 edition = "2021"
 description = "bOS Kernel - Protected mode Rust kernel"
 
@@ -9,6 +9,7 @@ bloader_shared = { path = "../bloader_shared" }
 x86_64 = "0.15"
 volatile = "0.4"
 spin = "0.9"
+smoltcp = { version = "=0.12.0", default-features = false, features = ["alloc", "medium-ethernet", "proto-ipv4", "socket-dhcpv4", "socket-icmp"] }
 bitflags = "2.0"
 lazy_static = { version = "1.4", features = ["spin_no_std"] }
 log = "0.4"

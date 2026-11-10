@@ -32,9 +32,11 @@ pub fn run(boot_info: &'static bloader_shared::BootInfo) -> ! {
     console::clear();
     crate::arch::x86_64::speaker_beep(660, 90);
     let storage = fs::init(boot_info);
+    crate::drivers::net::init();
     cmd_cd(None);
-    print_str("bOS kernel console (bSH) v");
+    print_str("\x1b[96mbOS kernel console (bSH) v");
     print_str(KERNEL_VERSION);
+    print_str("\x1b[0m");
     print_str(" — type 'help'\r\n");
     print_line(storage);
     let mut history = line::History::new();
@@ -260,6 +262,19 @@ fn run_capture(
             cmd_bfetch(kernel_uuid, out);
             0
         }
+        "lspci" => {
+            use crate::drivers::pci;
+            for device in pci::enumerate() {
+                emit(out, &alloc::format!(
+                    "{:02x}:{:02x}.{} {:04x}:{:04x} {} (rev {:02x})",
+                    device.bus, device.dev, device.fun, device.vendor, device.device,
+                    pci::class_name(device.class, device.subclass), device.revision,
+                ));
+            }
+            0
+        }
+        "ifconfig" => crate::drivers::net::ifconfig(args, out),
+        "ping" => crate::drivers::net::ping(args, out),
         "bitstat" => {
             emit(out, &alloc::format!("bOS: {}-bit (x86_64)", usize::BITS));
             0
@@ -461,6 +476,9 @@ const COMMANDS: &[(&str, &str)] = &[
     ("uname", "uname [-a] — system name"),
     ("bitstat", "bitstat — show the kernel bitness"),
     ("bfetch", "bfetch — show a system summary"),
+    ("lspci", "lspci — list PCI devices and hardware IDs"),
+    ("ifconfig", "ifconfig [dhcp | static <IPv4/prefix> [gateway]] — configure eth0"),
+    ("ping", "ping <IPv4 address> — send one ICMP echo request"),
     ("calculator", "calculator [expression] — integer arithmetic (+ - * / %)"),
     ("calculator.sh", "calculator.sh — alias for the built-in calculator"),
     ("edit", "edit [-a] <file> — enter new text or append with -a"),

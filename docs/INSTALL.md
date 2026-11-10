@@ -10,7 +10,7 @@ The **Live ISO** boots bSH directly in a virtual machine or from an optical disc
 
    ```sh
    sudo mkdir -p /mnt/bos-install
-   sudo mount -o loop,ro bos-0.2.0-x86_64-install.iso /mnt/bos-install
+   sudo mount -o loop,ro bos-0.5.0-x86_64-install.iso /mnt/bos-install
    sudo bash /mnt/bos-install/install.sh /dev/sdX
    sudo umount /mnt/bos-install
    ```
@@ -29,7 +29,7 @@ The installer writes a GPT partition table and a FAT32 EFI System Partition. A p
 
    ```sh
    sudo mkdir -p /mnt/bos-install
-   sudo mount -o loop,ro bos-0.2.0-x86_64-install.iso /mnt/bos-install
+   sudo mount -o loop,ro bos-0.5.0-x86_64-install.iso /mnt/bos-install
    sudo bash /mnt/bos-install/install.sh /dev/sdX
    sudo umount /mnt/bos-install
    ```

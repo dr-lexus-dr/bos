@@ -5,7 +5,8 @@ use log::info;
 
 #[derive(Debug, Clone, Copy)]
 pub struct PciDev { pub bus: u8, pub dev: u8, pub fun: u8,
-    pub vendor: u16, pub device: u16, pub class: u8, pub subclass: u8, pub prog_if: u8 }
+    pub vendor: u16, pub device: u16, pub class: u8, pub subclass: u8, pub prog_if: u8,
+    pub revision: u8 }
 
 fn cfg_addr(bus: u8, dev: u8, fun: u8, off: u8) -> u32 {
     0x8000_0000
@@ -67,6 +68,7 @@ pub fn enumerate() -> Vec<PciDev> {
                     vendor: id as u16, device: (id >> 16) as u16,
                     class: (cc >> 24) as u8, subclass: (cc >> 16) as u8,
                     prog_if: (cc >> 8) as u8,
+                    revision: cc as u8,
                 });
             }
         }

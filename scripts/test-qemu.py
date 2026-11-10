@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Smoke-test the release ESP and a disposable bFS disk at 512 MiB."""
+"""Smoke-test the release ESP, a disposable bFS disk, and Ethernet at 512 MiB."""
 import hashlib
 import os
 from pathlib import Path
@@ -44,13 +44,13 @@ class Console:
 
 
 @contextmanager
-def boot(esp, disk=None):
+def boot(esp, disk=None, *, nic="e1000"):
     command = ["bash", "scripts/run-qemu.sh", str(esp)]
     if disk is not None:
         command.append(str(disk))
     start = time.monotonic()
     with subprocess.Popen(
-        command, cwd=ROOT, env={**os.environ, "BOS_MEMORY": "512M"},
+        command, cwd=ROOT, env={**os.environ, "BOS_MEMORY": "512M", "BOS_NIC": nic},
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
     ) as process:
         console = Console(process)
@@ -85,6 +85,41 @@ def fixture_esp(work):
     return esp
 
 
+def wait_for_dhcp(shell):
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        status = shell.command("ifconfig")
+        if b"inet 10.0.2.15/24 (DHCP)" in status:
+            assert b"gateway 10.0.2.2" in status
+            return status
+        time.sleep(0.1)
+    raise AssertionError(f"No DHCP lease\n{status!r}")
+
+
+def check_network(esp):
+    for nic, model in (
+        ("e1000", b"Intel 82540EM"),
+        ("e1000e", b"Intel 82574L"),
+        ("rtl8139", b"Realtek RTL8139"),
+    ):
+        with boot(esp, nic=nic) as (shell, _):
+            assert model in wait_for_dhcp(shell)
+            # Enough traffic to wrap the RTL8139's 8 KiB RX ring.
+            for _ in range(140 if nic == "rtl8139" else 1):
+                shell.command("ping 10.0.2.2", b"reply from 10.0.2.2")
+            if nic == "e1000":
+                shell.command("ifconfig static 10.0.2.15/24 192.168.0.1", b"gateway must be another host")
+                shell.command("ifconfig", b"inet 10.0.2.15/24 (DHCP)")
+                shell.command("ifconfig static 10.0.2.15/24 10.0.2.2", b"inet 10.0.2.15/24 (static)")
+                shell.command("ping 10.0.2.2", b"reply from 10.0.2.2")
+                shell.command("ifconfig dhcp")
+                wait_for_dhcp(shell)
+
+    with boot(esp, nic="none") as (shell, _):
+        shell.command("ifconfig", b"No supported Ethernet adapter")
+        shell.command("ping 10.0.2.2", b"no supported Ethernet adapter")
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="bos-test-") as directory:
         work = Path(directory)
@@ -93,6 +128,8 @@ def main():
         subprocess.run([ROOT / "target/release/mkusers", disk], check=True)
         with boot(esp) as (shell, output):
             assert b"No data disk; /users is in RAM" in output
+            assert b"\x1b[96mbOS kernel console (bSH) v" in output
+            shell.command("lspci", b"8086:100e Ethernet")
             shell.command("calculator 2 + 3 * 4", b"\r\n14\r\n")
             shell.command(b"bfe\t", b"Shell: bSH")
             shell.command("echo history", b"\r\nhistory\r\n")
@@ -129,8 +166,9 @@ def main():
             assert b"Data disk rejected; /users is in RAM" in output
             shell.command("halt", prompt=b"halted.\r\n")
         assert hashlib.sha256(disk.read_bytes()).digest() == original
+        check_network(esp)
 
-    print("Live boot, line editing, ring-3 execution, disk persistence and rejected disk passed")
+    print("Live boot, line editing, ring-3 execution, bFS persistence and Ethernet passed")
 
 
 if __name__ == "__main__":

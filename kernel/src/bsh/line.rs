@@ -66,6 +66,7 @@ static INPUT: Mutex<Input> = Mutex::new(Input {
 impl Input {
     fn next_key(&mut self) -> Key {
         loop {
+            crate::drivers::net::poll();
             if let Some(byte) = serial::try_read_byte() {
                 if let Some(key) = self.serial(byte) {
                     return key;

@@ -540,15 +540,14 @@ fn setup_framebuffer(boot_services: &BootServices) -> Option<FramebufferInfo> {
         .ok()?;
 
     let mode = gop.current_mode_info();
-    let mut fb = gop.frame_buffer();
-    let base = fb.as_mut_ptr() as u64;
     let (w, h) = mode.resolution();
     let pixel_format = match mode.pixel_format() {
         UefiPixelFormat::Rgb => PixelFormat::RGB,
         UefiPixelFormat::Bgr => PixelFormat::BGR,
         UefiPixelFormat::Bitmask => PixelFormat::Bitmask,
-        UefiPixelFormat::BltOnly => PixelFormat::BGRA,
+        UefiPixelFormat::BltOnly => return None,
     };
+    let base = gop.frame_buffer().as_mut_ptr() as u64;
 
     Some(FramebufferInfo {
         base_addr: base,

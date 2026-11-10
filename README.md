@@ -14,6 +14,30 @@
 
 bOS 0.2.0 can save `/users` to a dedicated bFS disk in QEMU and run a static ELF64 program in user mode. Live sessions without a data disk use RAM. The Linux tools ship as separate programs.
 
+bOS 0.3.0 adds ANSI foreground and background colors to the framebuffer console. Use `lspci` to see the PCI IDs of devices detected by bOS.
+
+bOS 0.4.0 adds DHCPv4 and `ping` on the Intel 82540EM. bOS 0.5.0 adds Intel 82574L, Realtek RTL8139 and manual IPv4 configuration.
+
+### Ethernet in bSH
+
+```text
+lspci
+ifconfig
+ping 10.0.2.2
+ifconfig static 10.0.2.15/24 10.0.2.2
+ifconfig dhcp
+```
+
+The example uses addresses from QEMU's default virtual network. bOS selects one supported Ethernet controller as `eth0` and starts DHCP at boot. Manual settings apply to the current session. Use `BOS_NIC=e1000e` or `BOS_NIC=rtl8139` with `scripts/run-qemu.sh` to try another model.
+
+| Controller | PCI ID | Verified in |
+| --- | --- | --- |
+| Intel 82540EM | `8086:100e` | QEMU `e1000` |
+| Intel 82574L | `8086:10d3` | QEMU `e1000e` |
+| Realtek RTL8139 | `10ec:8139` | QEMU `rtl8139` |
+
+Physical cards still need validation. RTL8168/8111 and Wi-Fi require separate drivers.
+
 ### Build and run
 
 On Linux, install Rust via rustup, GNU tar, GNU binutils, QEMU x86-64, and OVMF. To build ISO images, also install Python 3 with `pycdlib`, `dosfstools`, and `mtools`. The Rust version and targets come from `rust-toolchain.toml`.
@@ -23,7 +47,7 @@ bash scripts/build.sh --release
 bash scripts/run-qemu.sh
 ```
 
-The launcher defaults to 512 MiB and `-cpu max`. Set `BOS_MEMORY` to change RAM or `OVMF_CODE` if the firmware is installed at a different path. For the ISO images, use the same build output:
+The launcher defaults to 4 GiB and `-cpu max`. Set `BOS_MEMORY` (for example, `512M`) to change RAM or `OVMF_CODE` if the firmware is installed at a different path. For the ISO images, use the same build output:
 
 ```sh
 python3 scripts/mkiso.py
@@ -72,6 +96,24 @@ Type a line in the editor, then `.save` to write it or `.quit` to discard it. Ru
 
 В bOS 0.2.0 каталог `/users` можно хранить на отдельном диске bFS в QEMU. Команда `/applications/hello` запускает ELF64 в пользовательском режиме. Без диска данных изменения хранятся в RAM. Утилиты для Linux собираются отдельно.
 
+В bOS 0.3.0 консоль framebuffer отображает 16 цветов ANSI для текста и фона. Команда `lspci` показывает PCI ID устройств, обнаруженных bOS.
+
+В 0.4.0 появились DHCPv4 и `ping` для Intel 82540EM. Версия 0.5.0 добавляет Intel 82574L, Realtek RTL8139 и ручную настройку IPv4.
+
+### Ethernet в bSH
+
+```text
+lspci
+ifconfig
+ping 10.0.2.2
+ifconfig static 10.0.2.15/24 10.0.2.2
+ifconfig dhcp
+```
+
+Адреса в примере относятся к виртуальной сети QEMU. При загрузке bOS выбирает одну карту как `eth0` и запускает DHCP. Ручные настройки действуют до перезагрузки. Для выбора виртуальной карты передайте `BOS_NIC=e1000e` или `BOS_NIC=rtl8139` скрипту `scripts/run-qemu.sh`.
+
+В QEMU проверены Intel 82540EM (`8086:100e`), Intel 82574L (`8086:10d3`) и Realtek RTL8139 (`10ec:8139`). На физических картах проверка ещё не проводилась. Для RTL8168/8111 и Wi-Fi нужны отдельные драйверы.
+
 ### Сборка и запуск
 
 На Linux установите Rust через rustup, GNU tar, GNU binutils, QEMU x86-64 и OVMF. Для сборки ISO также понадобятся Python 3 с пакетом `pycdlib`, `dosfstools` и `mtools`. Версия Rust и целевые платформы указаны в `rust-toolchain.toml`.
@@ -81,7 +123,7 @@ bash scripts/build.sh --release
 bash scripts/run-qemu.sh
 ```
 
-По умолчанию QEMU получает 512 МиБ и запускается с `-cpu max`. Объём памяти можно задать через `BOS_MEMORY`, путь к OVMF — через `OVMF_CODE`. Чтобы собрать оба образа:
+По умолчанию QEMU получает 4 ГиБ и запускается с `-cpu max`. Объём памяти можно задать через `BOS_MEMORY` (например, `512M`), путь к OVMF — через `OVMF_CODE`. Чтобы собрать оба образа:
 
 ```sh
 python3 scripts/mkiso.py
@@ -108,8 +150,8 @@ bash scripts/run-qemu.sh target/esp target/users.img
 ## Инструменты для Linux
 
 Следующие утилиты запускаются в Linux из каталога проекта. Текущий режим
-загрузки bOS использует встроенную оболочку `bSH`. Запуск пользовательских
-процессов и сетевой стек внутри bOS пока в разработке.
+загрузки bOS использует встроенную оболочку `bSH`. Утилита `bnet` использует
+сеть Linux-хоста. Команды `ifconfig` и `ping` в bSH используют сеть ядра bOS.
 
 ## bPT · bOS Package Tool
 

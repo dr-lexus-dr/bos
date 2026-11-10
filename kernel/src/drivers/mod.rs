@@ -14,6 +14,7 @@ pub mod usb;
 pub mod ahci;
 pub mod nvme;
 pub mod e1000;
+mod rtl8139;
 pub mod virtio;
 pub mod virtio_block;
 pub mod gpu;
@@ -32,7 +33,6 @@ pub fn init(boot_info: &bloader_shared::BootInfo) {
     ahci::init();
     nvme::init();
     block::init();
-    e1000::init();
     virtio::init();
     net::init();
     usb::init();
