@@ -1,0 +1,5 @@
+[package]
+name = "bsh"
+version = "0.1.0"
+edition = "2021"
+description = "bOS shell"

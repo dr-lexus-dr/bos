@@ -1,0 +1,5 @@
+[package]
+name = "bcompat-win32"
+version = "0.1.0"
+edition = "2021"
+description = "Win32 PE loader shim (host tools)"

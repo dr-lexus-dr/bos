@@ -1,0 +1,15 @@
+[package]
+name = "bpm"
+version = "0.1.0"
+edition = "2021"
+description = "bOS Package Manager - installs packages from GitHub"
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+reqwest = { workspace = true, features = ["json"] }
+anyhow = { workspace = true }
+toml = { workspace = true }
+sha2 = { workspace = true }
+flate2 = { workspace = true }
+tar = { workspace = true }

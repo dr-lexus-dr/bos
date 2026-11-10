@@ -1,0 +1,4 @@
+# default: host target. UEFI/kernel builds pass --target explicitly.
+[build]
+# target = "x86_64-unknown-uefi"
+rustflags = []

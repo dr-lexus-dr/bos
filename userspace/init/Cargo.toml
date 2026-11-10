@@ -1,0 +1,5 @@
+[package]
+name = "binit"
+version = "0.1.0"
+edition = "2021"
+description = "bOS init (PID 1 userspace)"

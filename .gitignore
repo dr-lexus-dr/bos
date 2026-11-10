@@ -1,0 +1,34 @@
+# Rust builds, boot images, and generated firmware files
+/target/
+*.iso
+*.img
+*.efi
+NvVars
+
+# Local runtime files
+/system/logs/*
+!/system/logs/.placeholder
+/system/tmp/
+/system/mounts/
+/system/bpm/
+# bpm installs packages as directories in applications/.
+/applications/*/
+
+# User data, with only the bundled default profile tracked
+/users/*
+!/users/.placeholder
+!/users/default/
+/users/default/*
+!/users/default/.profile
+
+# Local environment, credentials, and editor files
+.env
+.env.*
+*.pem
+*.key
+*.log
+/.idea/
+/.vscode/
+__pycache__/
+*.pyc
+.DS_Store

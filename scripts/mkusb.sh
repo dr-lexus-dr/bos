@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+#
+# bOS: write a bootable USB stick (UEFI, no Secure Boot signature).
+#
+# What it does (ERASES the whole disk!):
+#   1. GPT label + single EFI System Partition (FAT32, type EF00)
+#   2. copies <esp>/ (EFI/BOOT/BOOTX64.EFI, EFI/bOS/...) onto it
+#
+# Usage:
+#   sudo bash scripts/mkusb.sh /dev/sdX [--esp DIR] [--yes]
+#
+#   /dev/sdX must be the WHOLE disk (not a partition like /dev/sdX1).
+#   Find it with: lsblk -d -o NAME,SIZE,MODEL,TRAN
+#
+# Requirements: sfdisk (util-linux), dosfstools (mkfs.vfat), root.
+#
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ESP="$ROOT/target/esp"
+YES=0
+DEV=""
+
+log()  { printf '[mkusb] %s\n' "$*"; }
+die()  { printf '[mkusb] ERROR: %s\n' "$*" >&2; exit 1; }
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --esp)   ESP="${2:?--esp needs a directory}"; shift 2 ;;
+        --esp=*) ESP="${1#--esp=}"; shift ;;
+        --yes)   YES=1; shift ;;
+        -h|--help)
+            awk '/^# bOS: write/{p=1} /^set -euo pipefail/{p=0} p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        /dev/*)  DEV="$1"; shift ;;
+        *)       die "unknown argument '$1' (try --help)" ;;
+    esac
+done
+
+[[ -n "$DEV" ]] || die "no device given (example: sudo bash scripts/mkusb.sh /dev/sdb --yes)"
+[[ -b "$DEV" ]] || die "$DEV is not a block device"
+[[ "$DEV" =~ [0-9]$ ]] && die "$DEV looks like a partition — pass the whole disk (e.g. /dev/sdb)"
+[[ -d "$ESP/EFI/BOOT" ]] || die "ESP dir missing $ESP/EFI/BOOT — run scripts/build.sh first"
+[[ -f "$ESP/EFI/BOOT/BOOTX64.EFI" ]] || die "no BOOTX64.EFI in $ESP — run scripts/build.sh first"
+[[ "$(id -u)" -eq 0 ]] || die "must run as root (sudo)"
+command -v sfdisk >/dev/null || die "sfdisk not found (apt install util-linux)"
+command -v mkfs.vfat >/dev/null || die "mkfs.vfat not found (apt install dosfstools)"
+
+# Refuse if any partition of this disk is mounted (except swap).
+if lsblk -nr -o MOUNTPOINT "$DEV" | grep -q '/'; then
+    die "$DEV (or a partition) is mounted — unmount first, then retry"
+fi
+
+log "target disk:"
+lsblk -d -o NAME,SIZE,MODEL,TRAN "$DEV" || true
+log "ESP source: $ESP"
+log "THIS ERASES ALL DATA ON $DEV"
+
+if [[ "$YES" -ne 1 ]]; then
+    read -r -p "[mkusb] type YES to continue: " ans
+    [[ "$ans" == "YES" ]] || die "aborted"
+fi
+
+log "partitioning $DEV (GPT + ESP)..."
+sfdisk --wipe always "$DEV" <<'EOF'
+label: gpt
+size=+, type=uefi
+EOF
+partprobe "$DEV" || true
+sleep 1
+
+# Partition node: /dev/sdb1, or /dev/mmcblk0p1 / /dev/nvme0n1p1 style.
+if [[ -b "${DEV}1" ]]; then PART="${DEV}1"; else PART="${DEV}p1"; fi
+[[ -b "$PART" ]] || die "partition node $PART not found after partitioning"
+
+log "mkfs.vfat $PART ..."
+mkfs.vfat -F 32 -n BOS_EFI "$PART" >/dev/null
+
+MNT="$(mktemp -d /tmp/bos-usb.XXXXXX)"
+trap 'umount "$MNT" 2>/dev/null || true; rmdir "$MNT" 2>/dev/null || true' EXIT
+mount "$PART" "$MNT"
+log "copying $(du -sh "$ESP" | cut -f1) ..."
+cp -r "$ESP"/. "$MNT"/
+sync
+# Show what landed on the stick:
+find "$MNT" -type f -printf '  %P (%s bytes)\n' | sort
+umount "$MNT"
+trap - EXIT
+rmdir "$MNT"
+
+log "done. Boot notes:"
+log "  - plug into a USB2 port if USB3 boot fails on old boards"
+log "  - enter firmware setup: enable UEFI boot, DISABLE Secure Boot"
+log "    (bLOADER is not signed), then pick the stick in the boot menu"
+log "  - serial log needs a debug cable; otherwise watch the screen"

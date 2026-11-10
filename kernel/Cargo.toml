@@ -1,0 +1,27 @@
+[package]
+name = "bos_kernel"
+version = "0.1.0"
+edition = "2021"
+description = "bOS Kernel - Protected mode Rust kernel"
+
+[dependencies]
+bloader_shared = { path = "../bloader_shared" }
+x86_64 = "0.15"
+volatile = "0.4"
+spin = "0.9"
+bitflags = "2.0"
+lazy_static = { version = "1.4", features = ["spin_no_std"] }
+log = "0.4"
+uuid = { version = "=1.6.0", default-features = false }
+
+[features]
+default = []
+smp = []
+acpi = []
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+opt-level = "z"

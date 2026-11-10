@@ -1,0 +1,13 @@
+#!/bin/bash
+# bpm — bOS package manager launcher.
+# Prefers the compiled Rust binary (userspace/bpm), so the same tool
+# runs on the host and inside bOS.
+BOS_ROOT="${BOS_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+for bin in "$BOS_ROOT/target/release/bpm" "$BOS_ROOT/target/debug/bpm"; do
+    if [ -x "$bin" ]; then
+        exec "$bin" "$@"
+    fi
+done
+echo "bpm: binary not built yet. Run: cargo +stable build -p bpm" >&2
+echo "     usage: bpm help" >&2
+exit 1

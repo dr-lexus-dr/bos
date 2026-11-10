@@ -1,0 +1,15 @@
+[package]
+name = "bloader"
+version = "0.1.0"
+edition = "2021"
+description = "bOS Bootloader - minimal UEFI bootloader for bOS"
+
+[dependencies]
+uefi = { version = "0.23", features = ["alloc", "logger"] }
+uefi-services = { version = "0.20" }
+log = { version = "0.4", default-features = false }
+x86_64 = "0.15"
+bloader_shared = { path = "../bloader_shared" }
+
+[package.metadata.uefi]
+entry = "efi_main"

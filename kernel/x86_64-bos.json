@@ -1,0 +1,22 @@
+{
+  "arch": "x86_64",
+  "cpu": "x86-64",
+  "data-layout": ["i", "e", "m", "p"],
+  "disable-redzone": true,
+  "dynamic-linking": false,
+  "executables": true,
+  "features": "-mmx,-sse,+soft-float",
+  "linker": "rust-lld",
+  "linker-flavor": "gnu-lld-cc",
+  "llvm-target": "x86_64-unknown-none",
+  "max-atomic-width": 64,
+  "os": "none",
+  "panic-strategy": "abort",
+  "position-independent-executables": false,
+  "relro-level": "full",
+  "stack-probes": true,
+  "static-position-independent-executables": false,
+  "target-c-int-width": "32",
+  "target-endian": "little",
+  "target-pointer-width": "64"
+}

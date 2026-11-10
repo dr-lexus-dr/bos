@@ -1,0 +1,10 @@
+[package]
+name = "bnet"
+version = "0.1.0"
+edition = "2021"
+description = "bOS network tools - internet support"
+
+[dependencies]
+reqwest = { workspace = true }
+anyhow = { workspace = true }
+url = "2"

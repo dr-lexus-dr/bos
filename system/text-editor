@@ -1,0 +1,28 @@
+#!/bin/bash
+# text-editor — bOS standard text editor launcher (btext).
+# Prefers the compiled Rust binary (userspace/btext).
+BOS_ROOT="${BOS_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+for bin in "$BOS_ROOT/target/release/btext" "$BOS_ROOT/target/debug/btext"; do
+    if [ -x "$bin" ]; then
+        exec "$bin" "$@"
+    fi
+done
+# --- fallback: system editors ---
+FILE_PATH="$1"
+if [ -z "$FILE_PATH" ]; then
+    echo "Usage: text-editor <file-name>"
+    echo "Opens (or creates) a file for editing."
+    exit 1
+fi
+touch "$FILE_PATH"
+if command -v nano &>/dev/null; then
+    nano "$FILE_PATH"
+elif command -v vi &>/dev/null; then
+    echo "nano not available, opening with vi..."
+    vi "$FILE_PATH"
+else
+    cat "$FILE_PATH"
+    echo "=========================="
+    echo "No editor available. Install nano or build btext:"
+    echo "  cargo build -p btext"
+fi

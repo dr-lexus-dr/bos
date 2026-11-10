@@ -1,0 +1,39 @@
+#!/bin/bash
+# bnet — bOS network tools launcher (internet support).
+# Prefers the compiled Rust binary (userspace/bnet).
+BOS_ROOT="${BOS_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+for bin in "$BOS_ROOT/target/release/bnet" "$BOS_ROOT/target/debug/bnet"; do
+    if [ -x "$bin" ]; then
+        exec "$bin" "$@"
+    fi
+done
+# --- legacy fallback (host checks without the Rust binary) ---
+echo "bOS Network Tools"
+echo "================="
+if command -v curl &>/dev/null; then
+    echo "curl is available"
+else
+    echo "curl not found, installing..."
+    if command -v apt-get &>/dev/null; then
+        apt-get update && apt-get install -y curl
+    elif command -v yum &>/dev/null; then
+        yum install -y curl
+    fi
+fi
+echo ""
+echo "Checking internet connectivity..."
+if ping -c 1 -W 3 8.8.8.8 &>/dev/null; then
+    echo "✓ Internet connection is available"
+else
+    echo "✗ No internet connection detected"
+fi
+echo ""
+echo "Checking DNS resolution..."
+if curl -s --connect-timeout 5 https://www.google.com > /dev/null 2>&1; then
+    echo "✓ DNS and HTTPS connectivity works"
+else
+    echo "✗ DNS or HTTPS connectivity failed"
+fi
+echo ""
+echo "Network interfaces:"
+ifconfig 2>/dev/null || ip addr show 2>/dev/null || echo "No network interfaces found"

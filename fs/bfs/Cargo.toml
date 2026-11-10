@@ -1,0 +1,5 @@
+[package]
+name = "bfs"
+version = "0.1.0"
+edition = "2021"
+description = "bOS filesystem image tool (host-side bFS mkfs/fsck)"

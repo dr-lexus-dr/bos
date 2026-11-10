@@ -1,0 +1,5 @@
+[package]
+name = "bdriver-net"
+version = "0.1.0"
+edition = "2021"
+description = "bOS network drivers (e1000/rtl8139/virtio-net)"
