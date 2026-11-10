@@ -44,6 +44,10 @@ pub fn init(fb: Option<FramebufferInfo>) {
         log::info!("console: no framebuffer, serial only");
         return;
     };
+    if f.width < 8 || f.height < 16 || f.stride < f.width {
+        log::info!("console: invalid framebuffer dimensions, serial only");
+        return;
+    }
     if f.bits_per_pixel != 32 {
         log::info!("console: {}bpp unsupported, serial only", f.bits_per_pixel);
         return;
@@ -109,6 +113,24 @@ pub fn print(s: &str) {
     }
 }
 
+/// Toggle a cursor underline while the line editor is waiting for input.
+pub fn toggle_input_cursor() {
+    if !is_fb_on() {
+        return;
+    }
+    let fb = FB.lock();
+    if fb.x >= fb.width / 8 {
+        return;
+    }
+    let start = (fb.y * 16 + 15) * fb.stride + fb.x * 8;
+    for col in 0..8 {
+        unsafe {
+            let pixel = (fb.base as *mut u32).add((start + col) as usize);
+            pixel.write_volatile(pixel.read_volatile() ^ 0x00FF_FFFF);
+        }
+    }
+}
+
 /// Clear both outputs: ANSI for serial terms, fill for the framebuffer.
 pub fn clear() {
     crate::arch::x86_64::serial::write_str("\x1b[2J\x1b[H");
@@ -143,7 +165,9 @@ fn putc(fb: &mut Fb, b: u8) {
         0x08 => {
             if fb.x > 0 {
                 fb.x -= 1;
-                draw_glyph(fb, b' ');
+            } else if fb.y > 0 {
+                fb.y -= 1;
+                fb.x = cols - 1;
             }
         }
         _ => {
@@ -171,21 +195,12 @@ fn draw_glyph(fb: &Fb, g: u8) {
     let base = fb.base as *mut u32;
     for row in 0..16 {
         let bits = glyph[row];
-        if bits == 0 {
-            continue;
-        }
         for col in 0..8 {
-            if bits & (0x80 >> col) == 0 {
-                continue;
-            }
             let px = fb.x * 8 + col;
             let py = fb.y * 16 + row as u32;
-            let color: u32 = 0x00FF_FFFF; // white works for RGB and BGR
+            let color = if bits & (0x80 >> col) == 0 { 0 } else { 0x00FF_FFFF };
             unsafe {
-                core::ptr::write_volatile(
-                    base.add((py * fb.stride + px) as usize),
-                    color,
-                );
+                core::ptr::write_volatile(base.add((py * fb.stride + px) as usize), color);
             }
         }
     }

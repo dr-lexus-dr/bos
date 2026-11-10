@@ -37,6 +37,12 @@ lazy_static! {
 
     static ref TSS: x86_64::structures::tss::TaskStateSegment = {
         let mut tss = x86_64::structures::tss::TaskStateSegment::new();
+        // Separate stack for synchronous transitions from user mode.
+        #[repr(align(16))]
+        struct UserTrapStack([u8; 32 * 1024]);
+        static mut USER_TRAP_STACK: UserTrapStack = UserTrapStack([0; 32 * 1024]);
+        let stack = unsafe { core::ptr::addr_of!(USER_TRAP_STACK.0) as u64 };
+        tss.privilege_stack_table[0] = x86_64::VirtAddr::new(stack + 32 * 1024);
         // Set up IST (Interrupt Stack Table) for double fault, NMI, etc.
         tss.interrupt_stack_table[0] = {
             static mut IST_STACK: [u8; 4096 * 4] = [0; 4096 * 4];

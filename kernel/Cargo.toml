@@ -1,6 +1,6 @@
 [package]
 name = "bos_kernel"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "bOS Kernel - Protected mode Rust kernel"
 

@@ -140,6 +140,9 @@ pub trait FileSystem: Send + Sync {
     fn stat(&self, path: &str) -> Result<FileStat, FileSystemError>;
     fn mount(&mut self, device: &str, options: &str) -> Result<(), FileSystemError>;
     fn unmount(&mut self) -> Result<(), FileSystemError>;
+    fn sync(&self) -> Result<(), FileSystemError> {
+        Ok(())
+    }
     // --- optional POSIX-like ops (default: not implemented) ---
     fn rename(&self, _from: &str, _to: &str) -> Result<(), FileSystemError> {
         Err(FileSystemError::NotImplemented)
@@ -324,8 +327,15 @@ impl Vfs {
         let mp = normalize_path("/", mount_point)?;
         let idx =
             self.mounts.iter().position(|m| m.mount_point == mp).ok_or(FileSystemError::NotFound)?;
-        let mut mount = self.mounts.remove(idx);
-        mount.fs.unmount()?;
+        self.mounts[idx].fs.unmount()?;
+        self.mounts.remove(idx);
+        Ok(())
+    }
+
+    pub fn sync(&self) -> Result<(), FileSystemError> {
+        for mount in &self.mounts {
+            mount.fs.sync()?;
+        }
         Ok(())
     }
 
@@ -703,7 +713,7 @@ lazy_static! {
 }
 
 /// Initialize VFS: ramfs on `/` + skeleton dirs, initrd tarball imported.
-pub fn init(boot_info: &bloader_shared::BootInfo) {
+pub fn init(boot_info: &bloader_shared::BootInfo) -> &'static str {
     // Register known FS types, then mount a fresh ramfs at /.
     VFS.lock().register_filesystem(Box::new(crate::fs::ramfs::RamFs::new()));
     VFS.lock().register_filesystem(Box::new(crate::fs::bfs::BfsFileSystem::new("hd0")));
@@ -711,7 +721,7 @@ pub fn init(boot_info: &bloader_shared::BootInfo) {
         let mut vfs = VFS.lock();
         if let Err(e) = vfs.mount("ramdisk", "/", "ramfs", "") {
             info!("VFS: root mount failed: {:?}", e);
-            return;
+            return "VFS initialization failed";
         }
         for path in [
             "/applications",
@@ -745,5 +755,24 @@ pub fn init(boot_info: &bloader_shared::BootInfo) {
         }
     }
 
+    let storage = match crate::drivers::virtio_block::probe() {
+        Ok(Some(sectors)) => {
+            match bfs::BfsFileSystem::load_users_disk(sectors)
+                .and_then(|disk| VFS.lock().mount_fs("/users", "virtio0", Box::new(disk), false))
+            {
+                Ok(()) => "/users is persistent on virtio0",
+                Err(error) => {
+                    log::warn!("bFS data disk rejected: {:?}", error);
+                    "Data disk rejected; /users is in RAM"
+                }
+            }
+        }
+        Ok(None) => "No data disk; /users is in RAM",
+        Err(error) => {
+            log::warn!("VirtIO data disk unavailable: {}", error);
+            "Data disk unavailable; /users is in RAM"
+        }
+    };
     info!("VFS initialized");
+    storage
 }

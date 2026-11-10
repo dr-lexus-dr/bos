@@ -8,16 +8,16 @@
 //! classic bring-up commands (`help`, `info`, `uname`, `mem`, ...).
 
 mod calculator;
+mod line;
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use alloc::vec;
-use core::sync::atomic::{AtomicBool, Ordering};
 use log::info;
 use x86_64::instructions::port::Port;
 
 use crate::arch::x86_64::{cpu, serial};
-use crate::drivers::{console, keyboard, timer};
+use crate::drivers::{console, timer};
 use crate::fs::{self, FileSystemError, FileType};
 use crate::mm::{heap, phys};
 
@@ -26,33 +26,23 @@ const DEFAULT_HOME: &str = "/users/default";
 const DEFAULT_NOTES: &str = "/users/default/documents/notes.txt";
 const KERNEL_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-static FS_READY: AtomicBool = AtomicBool::new(false);
-
-fn ensure_fs(boot_info: &'static bloader_shared::BootInfo) {
-    if FS_READY.swap(true, Ordering::SeqCst) {
-        return;
-    }
-    fs::init(boot_info);
-    info!("bSH: VFS ready (ramfs on /, bFS mountable)");
-}
-
 pub fn run(boot_info: &'static bloader_shared::BootInfo) -> ! {
     info!("bSH: built-in console ready (polling serial + PS/2)");
     console::init(boot_info.framebuffer);
     console::clear();
     crate::arch::x86_64::speaker_beep(660, 90);
-    ensure_fs(boot_info);
+    let storage = fs::init(boot_info);
     cmd_cd(None);
     print_str("bOS kernel console (bSH) v");
     print_str(KERNEL_VERSION);
     print_str(" — type 'help'\r\n");
+    print_line(storage);
+    let mut history = line::History::new();
     loop {
         let cwd = fs::VFS.lock().get_cwd();
-        print_str("bSH:");
-        print_str(&cwd);
-        print_str("# ");
-        let line = read_line();
-        exec(&line, boot_info.kernel_uuid);
+        let command = line::read(&alloc::format!("bSH:{}# ", cwd), Some(&history));
+        history.record(&command);
+        exec(&command, boot_info.kernel_uuid);
     }
 }
 
@@ -80,6 +70,21 @@ fn exec(line: &str, kernel_uuid: uuid::Uuid) {
     };
     let args: Vec<&str> = toks[1..].iter().map(|s| s.as_str()).collect();
 
+    if cmd == "run" || cmd.starts_with('/') || cmd.starts_with("./") || cmd.starts_with("../") {
+        if redirections.input.is_some() || redirections.output.is_some() {
+            print_line("run: redirection is unavailable for user programs");
+            return;
+        }
+        let path = match (cmd, args.as_slice()) {
+            ("run", [path]) => *path,
+            ("run", _) => return print_line("usage: run <ELF path>"),
+            (path, []) => path,
+            _ => return print_line("run: arguments are unavailable for user programs"),
+        };
+        run_program(path);
+        return;
+    }
+
     // Interactive commands require direct access to the console.
     let interactive_calculator = cmd == "calculator" && args.is_empty();
     if (interactive_calculator || matches!(cmd, "cd" | "edit" | "notepad" | "reboot" | "halt" | "clear"))
@@ -98,10 +103,12 @@ fn exec(line: &str, kernel_uuid: uuid::Uuid) {
         },
         "calculator" if interactive_calculator => return calculator_prompt(),
         "reboot" => {
+            if !sync_before_shutdown() { return; }
             print_str("rebooting...\r\n");
             reboot();
         }
         "halt" => {
+            if !sync_before_shutdown() { return; }
             print_str("halted.\r\n");
             halt();
         }
@@ -141,11 +148,33 @@ fn exec(line: &str, kernel_uuid: uuid::Uuid) {
     }
 }
 
+fn run_program(path: &str) {
+    let data = {
+        let mut vfs = fs::VFS.lock();
+        match vfs.stat(path) {
+            Ok(stat) if stat.is_dir() || stat.size > 4 * 1024 * 1024 => {
+                return print_line("run: expected an ELF file no larger than 4 MiB");
+            }
+            Err(error) => return print_line(&alloc::format!("run: {}: {}", path, fs_err(error))),
+            _ => {}
+        }
+        vfs.read_file(path)
+    };
+    match data {
+        Ok(data) => match crate::user::run(&data) {
+            Ok(0) => {}
+            Ok(status) if status > 0 => print_line(&alloc::format!("run: exited with status {}", status)),
+            Ok(status) => print_line(&alloc::format!("run: user fault (vector {})", -status - 1)),
+            Err(error) => print_line(&alloc::format!("run: {}", error)),
+        },
+        Err(error) => print_line(&alloc::format!("run: {}: {}", path, fs_err(error))),
+    }
+}
+
 fn calculator_prompt() {
     print_line("bOS Calculator. Enter an integer expression or type 'quit'.");
     loop {
-        print_str("calc> ");
-        let input = read_line();
+        let input = line::read("calc> ", None);
         if input.trim() == "quit" {
             return;
         }
@@ -182,8 +211,7 @@ fn cmd_edit(args: &[&str]) {
     print_line("Prefix a leading dot with another dot to enter it literally.");
     let mut text = String::new();
     loop {
-        print_str("> ");
-        let line = read_line();
+        let line = line::read("> ", None);
         match line.as_str() {
             ".quit" => return,
             ".save" => {
@@ -269,6 +297,13 @@ fn run_capture(
         "tail" => cmd_tail(args, stdin_data, out),
         "du" => cmd_du(args, out),
         "df" => cmd_df(args, out),
+        "sync" => match fs::VFS.lock().sync() {
+            Ok(()) => 0,
+            Err(error) => {
+                emit(out, &alloc::format!("sync: {}", fs_err(error)));
+                1
+            }
+        },
         "mount" => cmd_mount(args, out),
         "umount" => cmd_umount(args, out),
         "truncate" => cmd_truncate(args, out),
@@ -420,58 +455,62 @@ fn split_redir(toks: Vec<Token>) -> Result<(Vec<String>, Redirections), &'static
 // help / info / uname
 // ---------------------------------------------------------------------------
 
+const COMMANDS: &[(&str, &str)] = &[
+    ("help", "help [cmd] — this text or details for one command"),
+    ("info", "info — full system info"),
+    ("uname", "uname [-a] — system name"),
+    ("bitstat", "bitstat — show the kernel bitness"),
+    ("bfetch", "bfetch — show a system summary"),
+    ("calculator", "calculator [expression] — integer arithmetic (+ - * / %)"),
+    ("calculator.sh", "calculator.sh — alias for the built-in calculator"),
+    ("edit", "edit [-a] <file> — enter new text or append with -a"),
+    ("run", "run <ELF path> — launch a bOS user program"),
+    ("notepad", "notepad [file] — append to a file, defaults to documents/notes.txt"),
+    ("echo", "echo <text...> — print arguments (supports > >>)"),
+    ("pwd", "pwd — print working directory"),
+    ("whoami", "whoami — show the current user"),
+    ("cd", "cd [dir] — change directory, defaults to home"),
+    ("ls", "ls [-l] [-a] [-h] [-d] [-R] [path...] — list directory"),
+    ("cat", "cat [-n] <file...> — print files (supports < > >>)"),
+    ("touch", "touch [-c] <file...> — create empty files"),
+    ("mkdir", "mkdir [-p] <dir...> — create directories"),
+    ("rmdir", "rmdir <dir...> — remove empty directories"),
+    ("rm", "rm [-r] [-f] <path...> — remove files/dirs"),
+    ("cp", "cp [-r] <src...> <dst> — copy files/dirs"),
+    ("mv", "mv [-f] <src...> <dst> — move/rename"),
+    ("ln", "ln -s <target> <link> — create symlink"),
+    ("readlink", "readlink <link...> — print symlink targets"),
+    ("stat", "stat <path...> — file status"),
+    ("wc", "wc [-l] [-w] [-c] [file...] — counts"),
+    ("head", "head [-n N] [file...] — first lines"),
+    ("tail", "tail [-n N] [file...] — last lines"),
+    ("du", "du [-h] [path...] — disk usage"),
+    ("df", "df [-h] — mounted filesystems"),
+    ("sync", "sync — flush mounted data disks"),
+    ("mount", "mount [dev mp type] — list or mount (ramfs, bFS)"),
+    ("umount", "umount <mp> — unmount"),
+    ("truncate", "truncate -s <size> <file...> — resize files"),
+    ("chmod", "chmod <oct> <path...> — change permission bits"),
+    ("find", "find [path] [-name pat] [-type f|d|l] — walk tree"),
+    ("mem", "mem — memory stats"),
+    ("uptime", "uptime — timer ticks"),
+    ("clear", "clear — clear screen"),
+    ("reboot", "reboot — reset via 8042"),
+    ("halt", "halt — cli + hlt"),
+];
+
 fn cmd_help(topic: Option<&str>, out: &mut String) {
-    const LIST: &[(&str, &str)] = &[
-        ("help", "help [cmd] — this text or details for one command"),
-        ("info", "info — full system info"),
-        ("uname", "uname [-a] — system name"),
-        ("bitstat", "bitstat — show the kernel bitness"),
-        ("bfetch", "bfetch — show a system summary"),
-        ("calculator", "calculator [expression] — integer arithmetic (+ - * / %)"),
-        ("calculator.sh", "calculator.sh — alias for the built-in calculator"),
-        ("edit", "edit [-a] <file> — enter new text or append with -a"),
-        ("notepad", "notepad [file] — append to a file, defaults to documents/notes.txt"),
-        ("echo", "echo <text...> — print arguments (supports > >>)"),
-        ("pwd", "pwd — print working directory"),
-        ("whoami", "whoami — show the current user"),
-        ("cd", "cd [dir] — change directory, defaults to home"),
-        ("ls", "ls [-l] [-a] [-h] [-d] [-R] [path...] — list directory"),
-        ("cat", "cat [-n] <file...> — print files (supports < > >>)"),
-        ("touch", "touch [-c] <file...> — create empty files"),
-        ("mkdir", "mkdir [-p] <dir...> — create directories"),
-        ("rmdir", "rmdir <dir...> — remove empty directories"),
-        ("rm", "rm [-r] [-f] <path...> — remove files/dirs"),
-        ("cp", "cp [-r] <src...> <dst> — copy files/dirs"),
-        ("mv", "mv [-f] <src...> <dst> — move/rename"),
-        ("ln", "ln -s <target> <link> — create symlink"),
-        ("readlink", "readlink <link...> — print symlink targets"),
-        ("stat", "stat <path...> — file status"),
-        ("wc", "wc [-l] [-w] [-c] [file...] — counts"),
-        ("head", "head [-n N] [file...] — first lines"),
-        ("tail", "tail [-n N] [file...] — last lines"),
-        ("du", "du [-h] [path...] — disk usage"),
-        ("df", "df [-h] — mounted filesystems"),
-        ("mount", "mount [dev mp type] — list or mount (ramfs, bFS)"),
-        ("umount", "umount <mp> — unmount"),
-        ("truncate", "truncate -s <size> <file...> — resize files"),
-        ("chmod", "chmod <oct> <path...> — change permission bits"),
-        ("find", "find [path] [-name pat] [-type f|d|l] — walk tree"),
-        ("mem", "mem — memory stats"),
-        ("uptime", "uptime — timer ticks"),
-        ("clear", "clear — clear screen"),
-        ("reboot", "reboot — reset via 8042"),
-        ("halt", "halt — cli + hlt"),
-    ];
     match topic {
         None => {
             emit(out, "commands:");
-            for (_, desc) in LIST {
+            for (_, desc) in COMMANDS {
                 emit(out, &alloc::format!("  {}", desc));
             }
+            emit(out, "keys: Up/Down history, Left/Right edit, Tab complete");
             emit(out, "redirection: cmd > file | cmd >> file | cmd < file");
             emit(out, "quoting: 'single' \"double\" back\\slash work");
         }
-        Some(t) => match LIST.iter().find(|(n, _)| *n == t) {
+        Some(t) => match COMMANDS.iter().find(|(n, _)| *n == t) {
             Some((_, d)) => emit(out, d),
             None => emit(out, &alloc::format!("help: no such command '{}'", t)),
         },
@@ -1848,94 +1887,14 @@ fn print_line(s: &str) {
     console::print("\r\n");
 }
 
-/// Read one line, polling serial COM1 and the PS/2 keyboard.
-/// Echoes input; handles CR/LF, backspace. Returns without the newline.
-fn read_line() -> String {
-    let mut line = String::new();
-    let mut shift = false;
-    let mut ext = false;
-    loop {
-        // Serial first (QEMU -serial stdio feeds keystrokes here).
-        if let Some(b) = serial::try_read_byte() {
-            match b {
-                b'\r' | b'\n' => {
-                    print_str("\r\n");
-                    break;
-                }
-                0x08 | 0x7f => {
-                    if line.pop().is_some() {
-                        print_str("\x08 \x08");
-                    }
-                }
-                0x20..=0x7e => {
-                    if line.len() < 1024 {
-                        line.push(b as char);
-                        serial::write_byte(b);
-                    }
-                }
-                _ => {}
-            }
-            continue;
-        }
-        // PS/2 Set-1 scancodes.
-        if let Some(sc) = keyboard::try_read() {
-            if ext {
-                ext = false;
-                continue;
-            }
-            match sc {
-                0xE0 => ext = true,
-                0x2A | 0x36 => shift = true,
-                0xAA | 0xB6 => shift = false,
-                0x1C => {
-                    print_str("\r\n");
-                    break;
-                }
-                0x0E => {
-                    if line.pop().is_some() {
-                        print_str("\x08 \x08");
-                    }
-                }
-                s if s >= 0x80 => {}
-                s => {
-                    if let Some(ch) = decode(s, shift) {
-                        if line.len() < 1024 {
-                            line.push(ch);
-                            print_str(ch.encode_utf8(&mut [0; 4]));
-                        }
-                    }
-                }
-            }
-            continue;
-        }
-        core::hint::spin_loop();
-    }
-    line
-}
-
-/// PS/2 Set-1 press-code -> char (letters, digits, space and basics).
-fn decode(sc: u8, shift: bool) -> Option<char> {
-    const ROW: &[(u8, char, char)] = &[
-        (0x02, '1', '!'), (0x03, '2', '@'), (0x04, '3', '#'), (0x05, '4', '$'),
-        (0x06, '5', '%'), (0x07, '6', '^'), (0x08, '7', '&'), (0x09, '8', '*'),
-        (0x0A, '9', '('), (0x0B, '0', ')'), (0x0C, '-', '_'), (0x0D, '=', '+'),
-        (0x0F, '\t', '\t'), (0x10, 'q', 'Q'), (0x11, 'w', 'W'), (0x12, 'e', 'E'),
-        (0x13, 'r', 'R'), (0x14, 't', 'T'), (0x15, 'y', 'Y'), (0x16, 'u', 'U'),
-        (0x17, 'i', 'I'), (0x18, 'o', 'O'), (0x19, 'p', 'P'), (0x1A, '[', '{'),
-        (0x1B, ']', '}'), (0x1E, 'a', 'A'), (0x1F, 's', 'S'), (0x20, 'd', 'D'),
-        (0x21, 'f', 'F'), (0x22, 'g', 'G'), (0x23, 'h', 'H'), (0x24, 'j', 'J'),
-        (0x25, 'k', 'K'), (0x26, 'l', 'L'), (0x27, ';', ':'), (0x28, '\'', '"'),
-        (0x29, '`', '~'), (0x2B, '\\', '|'), (0x2C, 'z', 'Z'), (0x2D, 'x', 'X'),
-        (0x2E, 'c', 'C'), (0x2F, 'v', 'V'), (0x30, 'b', 'B'), (0x31, 'n', 'N'),
-        (0x32, 'm', 'M'), (0x33, ',', '<'), (0x34, '.', '>'), (0x35, '/', '?'),
-        (0x39, ' ', ' '),
-    ];
-    for (code, lo, hi) in ROW {
-        if *code == sc {
-            return Some(if shift { *hi } else { *lo });
+fn sync_before_shutdown() -> bool {
+    match fs::VFS.lock().sync() {
+        Ok(()) => true,
+        Err(error) => {
+            print_line(&alloc::format!("sync: {}; shutdown canceled", fs_err(error)));
+            false
         }
     }
-    None
 }
 
 fn reboot() -> ! {

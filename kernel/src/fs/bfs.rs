@@ -6,10 +6,8 @@
 //! fixed-size dir entries and direct + single-indirect file blocks.
 //! Keep constants and encode/decode in sync with the host crate.
 //!
-//! Until a real block device driver is wired up, the filesystem lives in
-//! an in-RAM image (`Vec<u8>`) protected by `RwLock`. `format()` builds a
-//! fresh image; `mount()` auto-formats an empty instance so
-//! `mount ramdisk /system/mounts/data bFS` just works from bSH.
+//! Mounted images are cached in RAM. The optional VirtIO users disk writes
+//! dirty blocks back on sync. Explicit ramdisk mounts stay in memory.
 
 use alloc::vec::Vec;
 use alloc::boxed::Box;
@@ -34,6 +32,8 @@ pub const INODES_PER_BLOCK: u64 = 16;
 pub const ROOT_INO: u64 = 1;
 pub const NDIRECT: usize = 12;
 pub const PTRS_PER_BLOCK: usize = 512;
+const MAX_FILE_BLOCKS: u64 = (NDIRECT + PTRS_PER_BLOCK) as u64;
+const MAX_FILE_BYTES: u64 = MAX_FILE_BLOCKS * BLOCK_SIZE_U64;
 pub const MAX_NAME: usize = 255;
 pub const DIR_ENTRY_SIZE: usize = 8 + 2 + 1 + 1 + 255;
 pub const ENTRIES_PER_BLOCK: usize = BLOCK_SIZE / DIR_ENTRY_SIZE;
@@ -146,6 +146,7 @@ struct Inner {
     img: Vec<u8>,
     sb: Sb,
     mounted: bool,
+    dirty: Vec<bool>,
 }
 
 fn div_ceil(a: u64, b: u64) -> u64 {
@@ -275,7 +276,20 @@ impl Inner {
             return Err(FileSystemError::InvalidFormat);
         }
         let total = rd64(b, SB_TOTAL);
-        if total * BLOCK_SIZE_U64 != img.len() as u64 {
+        if total != (img.len() / BLOCK_SIZE) as u64 {
+            return Err(FileSystemError::InvalidFormat);
+        }
+        let inode_count = rd64(b, SB_ICOUNT);
+        let bb = rd64(b, SB_BB);
+        let ib = rd64(b, SB_IB);
+        let it = rd64(b, SB_IT);
+        let data = rd64(b, SB_DATA);
+        if rd64(b, SB_ROOT) != ROOT_INO || inode_count == 0 || inode_count > total * INODES_PER_BLOCK
+            || bb != 1 || ib != bb + div_ceil(total, BLOCK_SIZE_U64 * 8)
+            || it != ib + div_ceil(inode_count, BLOCK_SIZE_U64 * 8)
+            || data != it + div_ceil(inode_count, INODES_PER_BLOCK) || data >= total
+            || rd64(b, SB_FREE_B) > total - data || rd64(b, SB_FREE_I) >= inode_count
+        {
             return Err(FileSystemError::InvalidFormat);
         }
         Ok(Sb {
@@ -288,6 +302,71 @@ impl Inner {
             it_start: rd64(b, SB_IT),
             data_start: rd64(b, SB_DATA),
         })
+    }
+
+    fn validate_users_image(&self) -> Result<(), FileSystemError> {
+        let invalid = FileSystemError::InvalidFormat;
+        if !self.bit_get(self.sb.ib_start, ROOT_INO - 1)?
+            || self.read_inode(ROOT_INO)?.mode & S_IFMT != S_IFDIR
+        {
+            return Err(invalid);
+        }
+        let mut used = vec![false; self.sb.total_blocks as usize];
+        used[..self.sb.data_start as usize].fill(true);
+        let mut free_inodes = 0;
+        for index in 0..self.sb.inode_count {
+            if !self.bit_get(self.sb.ib_start, index)? {
+                free_inodes += 1;
+                continue;
+            }
+            let inode = self.read_inode(index + 1).map_err(|_| invalid)?;
+            let kind = inode.mode & S_IFMT;
+            if inode.num != index + 1 || inode.size > MAX_FILE_BYTES
+                || !matches!(kind, S_IFDIR | S_IFREG | S_IFLNK)
+                || (kind == S_IFDIR && (inode.size == 0 || inode.size % BLOCK_SIZE_U64 != 0))
+            {
+                return Err(invalid);
+            }
+            let mut mark = |block: u64| -> Result<(), FileSystemError> {
+                if block != 0 {
+                    let seen = used.get_mut(block as usize).ok_or(invalid)?;
+                    if core::mem::replace(seen, true) {
+                        return Err(invalid);
+                    }
+                }
+                Ok(())
+            };
+            for block in inode.direct {
+                mark(block)?;
+            }
+            if inode.indirect != 0 {
+                mark(inode.indirect)?;
+                let indirect = self.blk(inode.indirect)?;
+                for offset in (0..BLOCK_SIZE).step_by(8) {
+                    mark(rd64(indirect, offset))?;
+                }
+            }
+            if kind == S_IFDIR {
+                for entry in self.all_ents(&inode)? {
+                    if entry.inode == 0 || entry.inode > self.sb.inode_count
+                        || !self.bit_get(self.sb.ib_start, entry.inode - 1)?
+                    {
+                        return Err(invalid);
+                    }
+                }
+            }
+        }
+        let mut free_blocks = 0;
+        for (block, expected) in used.into_iter().enumerate() {
+            if expected != self.bit_get(self.sb.bb_start, block as u64)? {
+                return Err(invalid);
+            }
+            free_blocks += u64::from(!expected);
+        }
+        if free_blocks != self.sb.free_blocks || free_inodes != self.sb.free_inodes {
+            return Err(invalid);
+        }
+        Ok(())
     }
 
     fn sync_sb(&mut self) {
@@ -311,6 +390,9 @@ impl Inner {
     fn blk_mut(&mut self, n: u64) -> Result<&mut [u8], FileSystemError> {
         if n >= self.sb.total_blocks {
             return Err(FileSystemError::IoError);
+        }
+        if let Some(dirty) = self.dirty.get_mut(n as usize) {
+            *dirty = true;
         }
         let o = n as usize * BLOCK_SIZE;
         Ok(&mut self.img[o..o + BLOCK_SIZE])
@@ -530,6 +612,19 @@ impl Inner {
 
     fn write_data(&mut self, ino: u64, data: &[u8]) -> Result<(), FileSystemError> {
         let mut inod = self.read_inode(ino)?;
+        let size = data.len() as u64;
+        if size > MAX_FILE_BYTES {
+            return Err(FileSystemError::NoSpace);
+        }
+        let blocks = div_ceil(size, BLOCK_SIZE_U64);
+        let required = blocks + u64::from(blocks > NDIRECT as u64);
+        let mut reusable = u64::from(inod.indirect != 0);
+        for index in 0..MAX_FILE_BLOCKS {
+            reusable += u64::from(self.file_block(&inod, index)? != 0);
+        }
+        if required > self.sb.free_blocks + reusable {
+            return Err(FileSystemError::NoSpace);
+        }
         self.free_file_blocks(&mut inod)?;
         let mut off = 0usize;
         let mut idx = 0u64;
@@ -595,6 +690,33 @@ impl Inner {
             out.extend(decode_dents(&tmp));
         }
         Ok(out)
+    }
+
+    fn dir_entry(&self, dir: &Inode, name: &str) -> Result<Option<(u64, usize)>, FileSystemError> {
+        for index in 0..dir.size / BLOCK_SIZE_U64 {
+            let block = self.file_block(dir, index)?;
+            if block != 0 {
+                if let Some(slot) = decode_dents(self.blk(block)?).iter().position(|entry| entry.name == name) {
+                    return Ok(Some((block, slot)));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    fn dir_room(&self, dir: &Inode, data_blocks: u64) -> Result<(), FileSystemError> {
+        let count = dir.size / BLOCK_SIZE_U64;
+        for index in 0..count {
+            let block = self.file_block(dir, index)?;
+            if block != 0 && decode_dents(self.blk(block)?).len() < ENTRIES_PER_BLOCK {
+                return if data_blocks <= self.sb.free_blocks { Ok(()) } else { Err(FileSystemError::NoSpace) };
+            }
+        }
+        let required = data_blocks + 1 + u64::from(count >= NDIRECT as u64 && dir.indirect == 0);
+        if count >= MAX_FILE_BLOCKS || required > self.sb.free_blocks {
+            return Err(FileSystemError::NoSpace);
+        }
+        Ok(())
     }
 
     fn dir_add(&mut self, dir_ino: u64, name: &str, child: u64, ft: u8) -> Result<(), FileSystemError> {
@@ -721,7 +843,7 @@ impl BfsFileSystem {
         };
         Self {
             device: device.to_string(),
-            inner: Arc::new(RwLock::new(Inner { img: Vec::new(), sb, mounted: false })),
+            inner: Arc::new(RwLock::new(Inner { img: Vec::new(), sb, mounted: false, dirty: Vec::new() })),
         }
     }
 
@@ -732,7 +854,7 @@ impl BfsFileSystem {
         let sb = Inner::parse_sb(&img)?;
         Ok(Self {
             device: device.to_string(),
-            inner: Arc::new(RwLock::new(Inner { img, sb, mounted: false })),
+            inner: Arc::new(RwLock::new(Inner { img, sb, mounted: false, dirty: Vec::new() })),
         })
     }
 
@@ -741,8 +863,31 @@ impl BfsFileSystem {
         let sb = Inner::parse_sb(&img)?;
         Ok(Self {
             device: device.to_string(),
-            inner: Arc::new(RwLock::new(Inner { img, sb, mounted: false })),
+            inner: Arc::new(RwLock::new(Inner { img, sb, mounted: false, dirty: Vec::new() })),
         })
+    }
+
+    pub fn load_users_disk(sectors: u64) -> Result<Self, FileSystemError> {
+        use crate::drivers::virtio_block;
+        let bytes = sectors.checked_mul(512).ok_or(FileSystemError::InvalidFormat)?;
+        if !(4 * 1024 * 1024..=32 * 1024 * 1024).contains(&bytes) || bytes % BLOCK_SIZE_U64 != 0 {
+            return Err(FileSystemError::InvalidFormat);
+        }
+        let mut header = [0; BLOCK_SIZE];
+        virtio_block::read(0, &mut header).map_err(|_| FileSystemError::IoError)?;
+        if &header[SB_LABEL..SB_LABEL + 10] != b"bOS-users\0" {
+            return Err(FileSystemError::InvalidFormat);
+        }
+        let mut image = vec![0; bytes as usize];
+        virtio_block::read(0, &mut image).map_err(|_| FileSystemError::IoError)?;
+        let fs = Self::load_image("virtio0", image)?;
+        {
+            let mut g = fs.inner.write();
+            g.validate_users_image()?;
+            g.dirty = vec![false; g.sb.total_blocks as usize];
+            g.mounted = true;
+        }
+        Ok(fs)
     }
 
     pub fn device(&self) -> &str {
@@ -805,6 +950,7 @@ impl FileSystem for BfsFileSystem {
                 }
             }
             let parent = cur;
+            g.dir_room(&g.read_inode(parent)?, 0)?;
             let ino = g.alloc_inode()?;
             g.write_inode(&Inode {
                 num: ino,
@@ -887,6 +1033,7 @@ impl FileSystem for BfsFileSystem {
         if p.mode & S_IFMT != S_IFDIR {
             return Err(FileSystemError::NotDirectory);
         }
+        g.dir_room(&p, u64::from(file_type == FileType::Directory))?;
         match file_type {
             FileType::Directory => {
                 let ino = g.alloc_inode()?;
@@ -1030,46 +1177,57 @@ impl FileSystem for BfsFileSystem {
     }
 
     fn rename(&self, from: &str, to: &str) -> Result<(), FileSystemError> {
-        // File-only fast path: copy bytes + relink (dirs: refuse for now).
-        let (data, mode) = {
-            let g = self.inner.read();
-            let ino = g.lookup(from)?;
-            let inod = g.read_inode(ino)?;
-            if inod.mode & S_IFMT == S_IFDIR {
-                return Err(FileSystemError::NotImplemented);
-            }
-            if inod.mode & S_IFMT != S_IFREG && inod.mode & S_IFMT != S_IFLNK {
-                return Err(FileSystemError::NotImplemented);
-            }
-            (g.read_data(&inod)?, inod.mode)
-        };
-        // create destination (replace file/symlink, refuse non-empty dir)
-        match self.stat(to) {
-            Ok(st) => {
-                if st.is_dir() {
-                    return Err(FileSystemError::IsDirectory);
-                }
-                self.remove(to)?;
-            }
-            Err(FileSystemError::NotFound) => {}
-            Err(e) => return Err(e),
+        let mut g = self.inner.write();
+        let (from_parent, from_name) = super::split_parent(from);
+        let (to_parent, to_name) = super::split_parent(to);
+        if from_name.is_empty() || to_name.is_empty() || to_name.len() > MAX_NAME {
+            return Err(FileSystemError::InvalidArgument);
         }
-        // ensure parents exist is the caller's job (VFS shells use mkdir -p);
-        // try direct create, fall back to AlreadyExists propagation.
-        if self.lookup_exists(to)? {
-            return Err(FileSystemError::AlreadyExists);
+        let src_dir = g.read_inode(g.lookup(&from_parent)?)?;
+        let dst_dir = g.read_inode(g.lookup(&to_parent)?)?;
+        if src_dir.mode & S_IFMT != S_IFDIR || dst_dir.mode & S_IFMT != S_IFDIR {
+            return Err(FileSystemError::NotDirectory);
         }
-        self.create(to, FileType::RegularFile)?;
-        {
-            let mut g = self.inner.write();
-            let ino = g.lookup(to)?;
-            let mut inod = g.read_inode(ino)?;
-            inod.mode = mode;
-            g.write_inode(&inod)?;
-            g.write_data(ino, &data)?;
-            g.sync_sb();
+        let (src_block, src_slot) = g.dir_entry(&src_dir, &from_name)?.ok_or(FileSystemError::NotFound)?;
+        let mut entries = decode_dents(g.blk(src_block)?);
+        let mut moved = entries[src_slot].clone();
+        let kind = g.read_inode(moved.inode)?.mode & S_IFMT;
+        if !matches!(kind, S_IFREG | S_IFLNK) {
+            return Err(FileSystemError::NotImplemented);
         }
-        self.remove(from)?;
+        if src_dir.num == dst_dir.num && from_name == to_name {
+            return Ok(());
+        }
+        moved.name = to_name;
+        if let Some((block, slot)) = g.dir_entry(&dst_dir, &moved.name)? {
+            let mut destination = decode_dents(g.blk(block)?);
+            let mut old = g.read_inode(destination[slot].inode)?;
+            if old.mode & S_IFMT == S_IFDIR {
+                return Err(FileSystemError::IsDirectory);
+            }
+            if old.num == moved.inode {
+                return Ok(());
+            }
+            destination[slot] = moved;
+            encode_dents(&destination, g.blk_mut(block)?);
+            g.dir_remove(src_dir.num, &from_name)?;
+            old.links = old.links.saturating_sub(1);
+            if old.links == 0 {
+                g.free_file_blocks(&mut old)?;
+                g.free_inode(old.num)?;
+            } else {
+                g.write_inode(&old)?;
+            }
+        } else if src_dir.num == dst_dir.num {
+            entries[src_slot] = moved;
+            encode_dents(&entries, g.blk_mut(src_block)?);
+        } else {
+            g.dir_room(&dst_dir, 0)?;
+            g.dir_add(dst_dir.num, &moved.name, moved.inode, moved.ftype)?;
+            g.dir_remove(src_dir.num, &from_name)?;
+        }
+        g.trim_trailing_empty_dir_blocks(src_dir.num)?;
+        g.sync_sb();
         Ok(())
     }
 
@@ -1135,49 +1293,20 @@ impl FileSystem for BfsFileSystem {
     fn truncate(&self, path: &str, len: u64) -> Result<(), FileSystemError> {
         let mut g = self.inner.write();
         let ino = g.lookup(path)?;
-        let mut inod = g.read_inode(ino)?;
+        let inod = g.read_inode(ino)?;
         if inod.mode & S_IFMT == S_IFDIR {
             return Err(FileSystemError::IsDirectory);
         }
         if inod.mode & S_IFMT != S_IFREG {
             return Err(FileSystemError::InvalidArgument);
         }
-        if len < inod.size {
-            // shrink: rewrite prefix
-            let data = g.read_data(&inod)?;
-            g.free_file_blocks(&mut inod)?;
-            let mut off = 0usize;
-            let mut idx = 0u64;
-            let want = len as usize;
-            while off < want {
-                let b = g.file_block_alloc(&mut inod, idx)?;
-                idx += 1;
-                let take = (want - off).min(BLOCK_SIZE);
-                let mut tmp = [0u8; BLOCK_SIZE];
-                tmp[..take].copy_from_slice(&data[off..off + take]);
-                g.blk_mut(b)?.copy_from_slice(&tmp);
-                off += take;
-            }
-            inod.size = len;
-            g.write_inode(&inod)?;
-        } else if len > inod.size {
-            // grow: zero-fill tail
+        if len > MAX_FILE_BYTES {
+            return Err(FileSystemError::NoSpace);
+        }
+        if len != inod.size {
             let mut data = g.read_data(&inod)?;
             data.resize(len as usize, 0);
-            g.free_file_blocks(&mut inod)?;
-            let mut off = 0usize;
-            let mut idx = 0u64;
-            while off < data.len() {
-                let b = g.file_block_alloc(&mut inod, idx)?;
-                idx += 1;
-                let take = (data.len() - off).min(BLOCK_SIZE);
-                let mut tmp = [0u8; BLOCK_SIZE];
-                tmp[..take].copy_from_slice(&data[off..off + take]);
-                g.blk_mut(b)?.copy_from_slice(&tmp);
-                off += take;
-            }
-            inod.size = len;
-            g.write_inode(&inod)?;
+            g.write_data(ino, &data)?;
         }
         g.sync_sb();
         Ok(())
@@ -1215,7 +1344,29 @@ impl FileSystem for BfsFileSystem {
         Ok(())
     }
 
+    fn sync(&self) -> Result<(), FileSystemError> {
+        use crate::drivers::virtio_block;
+        let mut g = self.inner.write();
+        if !g.dirty.iter().any(|dirty| *dirty) {
+            return Ok(());
+        }
+        g.sync_sb();
+        // Write changed data before metadata, then the updated superblock.
+        let metadata_end = g.sb.data_start as usize;
+        let total = g.dirty.len();
+        for index in (metadata_end..total).chain(1..metadata_end).chain(core::iter::once(0)) {
+            if index == 0 || g.dirty[index] {
+                let block = g.blk(index as u64)?;
+                virtio_block::write(index as u64 * 8, block).map_err(|_| FileSystemError::IoError)?;
+            }
+        }
+        virtio_block::flush().map_err(|_| FileSystemError::IoError)?;
+        g.dirty.fill(false);
+        Ok(())
+    }
+
     fn unmount(&mut self) -> Result<(), FileSystemError> {
+        self.sync()?;
         let mut g = self.inner.write();
         g.sync_sb();
         g.mounted = false;
@@ -1295,28 +1446,23 @@ impl File for BfsFile {
         if self.append {
             self.offset = inod.size;
         }
-        // zero-fill gap when seeking past EOF
-        if self.offset > inod.size {
-            let gap = (self.offset - inod.size) as usize;
-            let mut data = g.read_data(&inod)?;
-            data.resize(data.len() + gap, 0);
-            let ino = self.ino;
-            g.free_file_blocks(&mut inod)?;
-            let mut off = 0usize;
-            let mut idx = 0u64;
-            while off < data.len() {
-                let b = g.file_block_alloc(&mut inod, idx)?;
-                idx += 1;
-                let take = (data.len() - off).min(BLOCK_SIZE);
-                let mut tmp = [0u8; BLOCK_SIZE];
-                tmp[..take].copy_from_slice(&data[off..off + take]);
-                g.blk_mut(b)?.copy_from_slice(&tmp);
-                off += take;
-            }
-            inod.size = data.len() as u64;
-            g.write_inode(&inod)?;
-            let _ = ino;
+        if buf.is_empty() {
+            return Ok(0);
         }
+        let end = self.offset.checked_add(buf.len() as u64).ok_or(FileSystemError::NoSpace)?;
+        if end > MAX_FILE_BYTES {
+            return Err(FileSystemError::NoSpace);
+        }
+        let first = self.offset / BLOCK_SIZE_U64;
+        let last = (end - 1) / BLOCK_SIZE_U64;
+        let mut required = u64::from(last >= NDIRECT as u64 && inod.indirect == 0);
+        for index in first..=last {
+            required += u64::from(g.file_block(&inod, index)? == 0);
+        }
+        if required > g.sb.free_blocks {
+            return Err(FileSystemError::NoSpace);
+        }
+        // Unallocated blocks between EOF and this write are read as zeros.
         let mut written = 0usize;
         while written < buf.len() {
             let idx = self.offset / BLOCK_SIZE_U64;

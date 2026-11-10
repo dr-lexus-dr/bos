@@ -2,7 +2,7 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
-use x86_64::instructions::tables::lidt;
+use x86_64::{instructions::tables::lidt, VirtAddr};
 use lazy_static::lazy_static;
 use crate::arch::x86_64::{interrupts, cpu};
 use log::{error, trace};
@@ -45,7 +45,10 @@ lazy_static! {
         unsafe { idt[0x2F].set_handler_fn(spurious_irq_handler); }
 
         // Syscall (vector 0x80)
-        unsafe { idt[0x80].set_handler_fn(syscall_handler); }
+        unsafe {
+            idt[0x80].set_handler_addr(VirtAddr::new(crate::user::user_syscall as *const () as u64))
+                .set_privilege_level(x86_64::PrivilegeLevel::Ring3);
+        }
         // Alternate syscall entry (SYSCALL/SYSRET)
         unsafe { idt[0x81].set_handler_fn(syscall_handler); }
 
@@ -79,11 +82,13 @@ pub fn is_loaded() -> bool {
 // Exception handlers
 
 extern "x86-interrupt" fn divide_error_handler(stack_frame: InterruptStackFrame) {
+    crate::user::abort_on_fault(&stack_frame, 0);
     error!("EXCEPTION: Divide Error\n{:#?}", stack_frame);
     crate::proc::exit_current(-1);
 }
 
 extern "x86-interrupt" fn debug_handler(stack_frame: InterruptStackFrame) {
+    crate::user::abort_on_fault(&stack_frame, 1);
     trace!("EXCEPTION: Debug\n{:#?}", stack_frame);
     // Don't kill process for debug exceptions
 }
@@ -94,26 +99,31 @@ extern "x86-interrupt" fn nmi_handler(stack_frame: InterruptStackFrame) {
 }
 
 extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
+    crate::user::abort_on_fault(&stack_frame, 3);
     trace!("EXCEPTION: Breakpoint\n{:#?}", stack_frame);
     // Continue execution
 }
 
 extern "x86-interrupt" fn overflow_handler(stack_frame: InterruptStackFrame) {
+    crate::user::abort_on_fault(&stack_frame, 4);
     error!("EXCEPTION: Overflow\n{:#?}", stack_frame);
     crate::proc::exit_current(-1);
 }
 
 extern "x86-interrupt" fn bound_range_exceeded_handler(stack_frame: InterruptStackFrame) {
+    crate::user::abort_on_fault(&stack_frame, 5);
     error!("EXCEPTION: Bound Range Exceeded\n{:#?}", stack_frame);
     crate::proc::exit_current(-1);
 }
 
 extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFrame) {
+    crate::user::abort_on_fault(&stack_frame, 6);
     error!("EXCEPTION: Invalid Opcode\n{:#?}", stack_frame);
     crate::proc::exit_current(-1);
 }
 
 extern "x86-interrupt" fn device_not_available_handler(stack_frame: InterruptStackFrame) {
+    crate::user::abort_on_fault(&stack_frame, 7);
     trace!("EXCEPTION: Device Not Available (FPU/SSE)");
     // Handle FPU/SSE lazy switching
     cpu::handle_fpu_exception();
@@ -125,26 +135,31 @@ extern "x86-interrupt" fn double_fault_handler(stack_frame: InterruptStackFrame,
 }
 
 extern "x86-interrupt" fn invalid_tss_handler(stack_frame: InterruptStackFrame, error_code: u64) {
+    crate::user::abort_on_fault(&stack_frame, 10);
     error!("EXCEPTION: Invalid TSS (error code: {})\n{:#?}", error_code, stack_frame);
     crate::proc::exit_current(-1);
 }
 
 extern "x86-interrupt" fn segment_not_present_handler(stack_frame: InterruptStackFrame, error_code: u64) {
+    crate::user::abort_on_fault(&stack_frame, 11);
     error!("EXCEPTION: Segment Not Present (error code: {})\n{:#?}", error_code, stack_frame);
     crate::proc::exit_current(-1);
 }
 
 extern "x86-interrupt" fn stack_segment_fault_handler(stack_frame: InterruptStackFrame, error_code: u64) {
+    crate::user::abort_on_fault(&stack_frame, 12);
     error!("EXCEPTION: Stack Segment Fault (error code: {})\n{:#?}", error_code, stack_frame);
     crate::proc::exit_current(-1);
 }
 
 extern "x86-interrupt" fn general_protection_fault_handler(stack_frame: InterruptStackFrame, error_code: u64) {
+    crate::user::abort_on_fault(&stack_frame, 13);
     error!("EXCEPTION: General Protection Fault (error code: {})\n{:#?}", error_code, stack_frame);
     crate::proc::exit_current(-1);
 }
 
 extern "x86-interrupt" fn page_fault_handler(stack_frame: InterruptStackFrame, error_code: PageFaultErrorCode) {
+    crate::user::abort_on_fault(&stack_frame, 14);
     use x86_64::registers::control::Cr2;
     let addr = Cr2::read().unwrap();
     trace!("EXCEPTION: Page Fault at {:?} (error: {:?})\n{:#?}", addr, error_code, stack_frame);
@@ -157,11 +172,13 @@ extern "x86-interrupt" fn page_fault_handler(stack_frame: InterruptStackFrame, e
 }
 
 extern "x86-interrupt" fn x87_floating_point_handler(stack_frame: InterruptStackFrame) {
+    crate::user::abort_on_fault(&stack_frame, 16);
     error!("EXCEPTION: x87 Floating Point\n{:#?}", stack_frame);
     crate::proc::exit_current(-1);
 }
 
 extern "x86-interrupt" fn alignment_check_handler(stack_frame: InterruptStackFrame, error_code: u64) {
+    crate::user::abort_on_fault(&stack_frame, 17);
     error!("EXCEPTION: Alignment Check (error code: {})\n{:#?}", error_code, stack_frame);
     crate::proc::exit_current(-1);
 }
@@ -172,16 +189,19 @@ extern "x86-interrupt" fn machine_check_handler(stack_frame: InterruptStackFrame
 }
 
 extern "x86-interrupt" fn simd_floating_point_handler(stack_frame: InterruptStackFrame) {
+    crate::user::abort_on_fault(&stack_frame, 19);
     error!("EXCEPTION: SIMD Floating Point\n{:#?}", stack_frame);
     crate::proc::exit_current(-1);
 }
 
 extern "x86-interrupt" fn virtualization_handler(stack_frame: InterruptStackFrame) {
+    crate::user::abort_on_fault(&stack_frame, 20);
     error!("EXCEPTION: Virtualization\n{:#?}", stack_frame);
     crate::proc::exit_current(-1);
 }
 
 extern "x86-interrupt" fn control_protection_handler(stack_frame: InterruptStackFrame, error_code: u64) {
+    crate::user::abort_on_fault(&stack_frame, 21);
     error!("EXCEPTION: Control Protection (error code: {})\n{:#?}", error_code, stack_frame);
     crate::proc::exit_current(-1);
 }

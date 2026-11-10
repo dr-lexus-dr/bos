@@ -15,6 +15,7 @@ pub mod ahci;
 pub mod nvme;
 pub mod e1000;
 pub mod virtio;
+pub mod virtio_block;
 pub mod gpu;
 pub mod audio;
 

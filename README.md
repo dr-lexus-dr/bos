@@ -12,18 +12,18 @@
 
 **bOS is a small, terminal-first operating system for x86-64 UEFI.** Boot straight into bSH, explore the filesystem, edit a note, or mount a bFS volume. The Rust kernel runs without the standard library, and a fresh session starts in `/users/default` with three directories at the root: `/system`, `/users`, and `/applications`.
 
-The current release is an experimental preview. The root filesystem and bFS volumes run in RAM, so changes reset on reboot. The Linux tools ship as separate programs.
+bOS 0.2.0 can save `/users` to a dedicated bFS disk in QEMU and run a static ELF64 program in user mode. Live sessions without a data disk use RAM. The Linux tools ship as separate programs.
 
 ### Build and run
 
-On Linux, install Rust via rustup, GNU tar, QEMU x86-64, and OVMF. To build ISO images, also install Python 3 with `pycdlib`, `dosfstools`, and `mtools`. The Rust version and targets come from `rust-toolchain.toml`.
+On Linux, install Rust via rustup, GNU tar, GNU binutils, QEMU x86-64, and OVMF. To build ISO images, also install Python 3 with `pycdlib`, `dosfstools`, and `mtools`. The Rust version and targets come from `rust-toolchain.toml`.
 
 ```sh
 bash scripts/build.sh --release
 bash scripts/run-qemu.sh
 ```
 
-Set `OVMF_CODE` if the firmware is installed at a different path. For the ISO images, use the same build output:
+The launcher defaults to 512 MiB and `-cpu max`. Set `BOS_MEMORY` to change RAM or `OVMF_CODE` if the firmware is installed at a different path. For the ISO images, use the same build output:
 
 ```sh
 python3 scripts/mkiso.py
@@ -31,6 +31,15 @@ python3 scripts/mkiso.py --install
 ```
 
 The outputs are `target/bos-live.iso` and `target/bos-install.iso`. Boot the **Live ISO** as a UEFI CD-ROM. The **Install ISO** includes a Linux script for installing bOS onto a dedicated drive. See the [installation guide](docs/INSTALL.md).
+
+### Save files between reboots
+
+```sh
+target/release/mkusers target/users.img
+bash scripts/run-qemu.sh target/esp target/users.img
+```
+
+Create the disk once and reuse it on subsequent boots. Run `sync` before closing QEMU. The bSH commands `reboot` and `halt` also flush pending writes. The preview supports this setup with one legacy VirtIO block disk in QEMU. The bFS volume is buffered in RAM and has no journal.
 
 ### First commands
 
@@ -41,12 +50,13 @@ pwd
 bitstat
 bfetch
 calculator 2 + 3 * 4
+/applications/hello
 ls /
 cd documents
 notepad
 ```
 
-Type a line in the editor, then `.save` to write it or `.quit` to discard it. Run `cat notes.txt` to read the file. Use `cd` to return home.
+Type a line in the editor, then `.save` to write it or `.quit` to discard it. Run `cat notes.txt` to read the file. Use `cd` to return home. Up and Down browse command history, Left and Right move the cursor, and Tab completes commands and paths.
 
 ## Русский
 
@@ -60,18 +70,18 @@ Type a line in the editor, then `.save` to write it or `.quit` to discard it. Ru
 └── applications/   приложения
 ```
 
-Это экспериментальный выпуск. Корневая файловая система и тома bFS работают в RAM. Изменения сбрасываются после перезагрузки. Утилиты для Linux собираются отдельно.
+В bOS 0.2.0 каталог `/users` можно хранить на отдельном диске bFS в QEMU. Команда `/applications/hello` запускает ELF64 в пользовательском режиме. Без диска данных изменения хранятся в RAM. Утилиты для Linux собираются отдельно.
 
 ### Сборка и запуск
 
-На Linux установите Rust через rustup, GNU tar, QEMU x86-64 и OVMF. Для сборки ISO также понадобятся Python 3 с пакетом `pycdlib`, `dosfstools` и `mtools`. Версия Rust и целевые платформы указаны в `rust-toolchain.toml`.
+На Linux установите Rust через rustup, GNU tar, GNU binutils, QEMU x86-64 и OVMF. Для сборки ISO также понадобятся Python 3 с пакетом `pycdlib`, `dosfstools` и `mtools`. Версия Rust и целевые платформы указаны в `rust-toolchain.toml`.
 
 ```sh
 bash scripts/build.sh --release
 bash scripts/run-qemu.sh
 ```
 
-Если OVMF установлен по другому пути, задайте его через `OVMF_CODE`. Чтобы собрать оба образа:
+По умолчанию QEMU получает 512 МиБ и запускается с `-cpu max`. Объём памяти можно задать через `BOS_MEMORY`, путь к OVMF — через `OVMF_CODE`. Чтобы собрать оба образа:
 
 ```sh
 python3 scripts/mkiso.py
@@ -80,7 +90,18 @@ python3 scripts/mkiso.py --install
 
 Образы появятся в `target/bos-live.iso` и `target/bos-install.iso`. **Live ISO** загружается как UEFI CD-ROM. **Install ISO** содержит скрипт для установки на отдельный накопитель из Linux. См. [инструкцию по установке](docs/INSTALL.md).
 
-В bSH попробуйте `help`, `whoami`, `pwd` и `ls /`. Команда `bitstat` показывает разрядность ядра bOS, а `bfetch` выводит версию ОС, процессор, память и параметры консоли. Введите `calculator.sh` для запуска встроенного калькулятора или `calculator 2 + 3 * 4` для одного вычисления. В интерактивном режиме команда `quit` возвращает в bSH. Для записи заметки откройте `notepad`, введите текст и завершите командой `.save`. Команда `cd` возвращает в домашний каталог.
+### Постоянный диск bFS
+
+```sh
+target/release/mkusers target/users.img
+bash scripts/run-qemu.sh target/esp target/users.img
+```
+
+Создайте образ один раз и используйте его при следующих запусках. Перед закрытием QEMU выполните `sync`. Команды bSH `reboot` и `halt` также сбрасывают изменения на диск. В 0.2.0 проверен отдельный диск VirtIO в QEMU. bFS кэширует том в RAM и работает без журнала.
+
+В bSH попробуйте `help`, `whoami`, `pwd` и `ls /`. Команда `bitstat` показывает разрядность ядра bOS, а `bfetch` выводит версию ОС, процессор, память и параметры консоли. Введите `calculator.sh` для запуска встроенного калькулятора или `calculator 2 + 3 * 4` для одного вычисления. В интерактивном режиме команда `quit` возвращает в bSH. Для записи заметки откройте `notepad`, введите текст и завершите командой `.save`. Команда `cd` возвращает в домашний каталог. Стрелки вверх и вниз листают историю команд, влево и вправо перемещают курсор. Tab дополняет команды и пути.
+
+Проверка загрузки, ELF64 и сохранения файлов после перезапуска доступна через `python3 scripts/test-qemu.py` после release-сборки.
 
 Подробнее об устройстве системы см. в [описании архитектуры](docs/ARCH.md).
 

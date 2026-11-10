@@ -28,6 +28,7 @@ mod ipc;
 mod compat;
 mod init;
 mod bsh;
+mod user;
 mod logger;
 
 use arch::x86_64::{gdt, idt, pic, apic, cpu, paging, serial};

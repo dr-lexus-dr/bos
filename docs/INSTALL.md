@@ -10,14 +10,14 @@ The **Live ISO** boots bSH directly in a virtual machine or from an optical disc
 
    ```sh
    sudo mkdir -p /mnt/bos-install
-   sudo mount -o loop,ro bos-0.1.0-x86_64-install.iso /mnt/bos-install
+   sudo mount -o loop,ro bos-0.2.0-x86_64-install.iso /mnt/bos-install
    sudo bash /mnt/bos-install/install.sh /dev/sdX
    sudo umount /mnt/bos-install
    ```
 
 4. Boot the drive from the firmware's UEFI boot menu with Secure Boot disabled. At the bSH prompt, try `help`, `whoami` and `ls /`.
 
-The installer writes a GPT partition table and a FAT32 EFI System Partition. bOS currently stores the running session in RAM. Edits are reset on reboot.
+The installer writes a GPT partition table and a FAT32 EFI System Partition. A physical boot uses a RAM session. For persistent files, use a separate bFS data disk in QEMU as described in the [README](../README.md#save-files-between-reboots).
 
 ## Русский
 
@@ -29,11 +29,11 @@ The installer writes a GPT partition table and a FAT32 EFI System Partition. bOS
 
    ```sh
    sudo mkdir -p /mnt/bos-install
-   sudo mount -o loop,ro bos-0.1.0-x86_64-install.iso /mnt/bos-install
+   sudo mount -o loop,ro bos-0.2.0-x86_64-install.iso /mnt/bos-install
    sudo bash /mnt/bos-install/install.sh /dev/sdX
    sudo umount /mnt/bos-install
    ```
 
 4. Отключите Secure Boot и выберите накопитель в меню загрузки UEFI. В bSH попробуйте команды `help`, `whoami` и `ls /`.
 
-Скрипт создаёт таблицу GPT и системный раздел EFI в FAT32. Сеанс bOS работает в RAM. Изменения файлов сбрасываются при перезагрузке.
+Скрипт создаёт таблицу GPT и системный раздел EFI в FAT32. При загрузке на физическом компьютере сеанс работает в RAM. Постоянный диск bFS поддерживается в QEMU. См. [инструкцию](../README.md#постоянный-диск-bfs).
