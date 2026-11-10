@@ -33,3 +33,6 @@ NvVars
 __pycache__/
 *.pyc
 .DS_Store
+
+# Locally compiled bitstat utility
+/bitstat

@@ -17,6 +17,8 @@ use uefi::fs::{FileSystem, Path};
 use uefi::table::boot::{MemoryType as UefiMemoryType, MemoryDescriptor, AllocateType};
 use uefi::{CString16, Guid};
 use log::{info, warn, error};
+use sha2::{Digest, Sha256};
+use uuid::{Builder, Uuid};
 
 use bloader_shared::{
     KernelHeader, BootInfo, MemoryRegion, MemoryType, MemoryFlags,
@@ -170,30 +172,42 @@ fn load_kernel(
         return Err(BootError::KernelCorrupted);
     }
 
-    if is_elf(&data) {
-        return load_kernel_elf(data);
-    }
-
-    let header: KernelHeader = unsafe { ptr::read(data.as_ptr() as *const KernelHeader) };
-    if header.magic != KERNEL_MAGIC {
-        error!("Invalid kernel magic: 0x{:x}", header.magic);
-        return Err(BootError::InvalidKernelHeader);
-    }
-    if header.version > BOOT_PROTOCOL_VERSION {
-        return Err(BootError::UnsupportedVersion);
+    let mut header = if is_elf(&data) {
+        load_kernel_elf(&data)?
+    } else {
+        let header = unsafe { ptr::read_unaligned(data.as_ptr().cast::<KernelHeader>()) };
+        if header.magic != KERNEL_MAGIC {
+            error!("Invalid kernel magic: 0x{:x}", header.magic);
+            return Err(BootError::InvalidKernelHeader);
+        }
+        if header.version > BOOT_PROTOCOL_VERSION {
+            return Err(BootError::UnsupportedVersion);
+        }
+        header
+    };
+    if header.uuid.is_nil() {
+        header.uuid = kernel_image_uuid(&data);
     }
     Ok((header, data))
 }
 
+/// Identify an exact kernel image independently of its address or boot session.
+fn kernel_image_uuid(data: &[u8]) -> Uuid {
+    let digest = Sha256::digest(data);
+    let mut bytes = [0; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    Builder::from_custom_bytes(bytes).into_uuid()
+}
+
 /// Build a synthetic KernelHeader for an ELF64 image (x86-64, PT_LOAD).
-fn load_kernel_elf(data: Vec<u8>) -> Result<(KernelHeader, Vec<u8>), BootError> {
-    if read_u16le(&data, 0x12) != 62 {
+fn load_kernel_elf(data: &[u8]) -> Result<KernelHeader, BootError> {
+    if read_u16le(data, 0x12) != 62 {
         return Err(BootError::UnsupportedArchitecture);
     }
-    let entry = read_u64le(&data, 0x18);
-    let phoff = read_u64le(&data, 0x20) as usize;
-    let phentsize = read_u16le(&data, 0x36) as usize;
-    let phnum = read_u16le(&data, 0x38) as usize;
+    let entry = read_u64le(data, 0x18);
+    let phoff = read_u64le(data, 0x20) as usize;
+    let phentsize = read_u16le(data, 0x36) as usize;
+    let phnum = read_u16le(data, 0x38) as usize;
     if phentsize < 56 || phoff + phentsize * phnum > data.len() {
         return Err(BootError::KernelCorrupted);
     }
@@ -202,15 +216,15 @@ fn load_kernel_elf(data: Vec<u8>) -> Result<(KernelHeader, Vec<u8>), BootError> 
     let mut has_load = false;
     for i in 0..phnum {
         let ph = phoff + i * phentsize;
-        if read_u32le(&data, ph) != 1 {
+        if read_u32le(data, ph) != 1 {
             continue; // PT_LOAD
         }
         has_load = true;
-        let vaddr = read_u64le(&data, ph + 16);
-        let memsz = read_u64le(&data, ph + 40);
+        let vaddr = read_u64le(data, ph + 16);
+        let memsz = read_u64le(data, ph + 40);
         max_end = max_end.max(vaddr + memsz);
-        let filesz = read_u64le(&data, ph + 32) as usize;
-        let off = read_u64le(&data, ph + 8) as usize;
+        let filesz = read_u64le(data, ph + 32) as usize;
+        let off = read_u64le(data, ph + 8) as usize;
         if off + filesz > data.len() {
             return Err(BootError::KernelCorrupted);
         }
@@ -229,7 +243,7 @@ fn load_kernel_elf(data: Vec<u8>) -> Result<(KernelHeader, Vec<u8>), BootError> 
     header.size = total;
     header.flags = KernelFlags::RELOCATABLE;
     header.required_memory = total;
-    Ok((header, data))
+    Ok(header)
 }
 
 /// Copy the loaded image to executable pages. Returns absolute entry point.

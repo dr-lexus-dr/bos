@@ -163,7 +163,7 @@ static KERNEL_HEADER: bloader_shared::KernelHeader = bloader_shared::KernelHeade
     size: 0, // Filled by linker
     flags: bloader_shared::KernelFlags::from_bits_truncate(0x3), // RELOCATABLE | REQUIRES_SMP
     required_memory: 64 * 1024 * 1024, // 64 MB minimum
-    uuid: uuid::Uuid::nil(),
+    uuid: uuid::Uuid::nil(), // bLOADER derives the image UUID when none is embedded.
     name: *b"bOS Kernel\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0",
     cmdline_default: *b"loglevel=debug console=serial\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0",
 };

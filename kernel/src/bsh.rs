@@ -7,6 +7,8 @@
 //! `head`, `tail`, `du`, `df`, `mount`, `find` and friends — alongside the
 //! classic bring-up commands (`help`, `info`, `uname`, `mem`, ...).
 
+mod calculator;
+
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use alloc::vec;
@@ -14,13 +16,14 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use log::info;
 use x86_64::instructions::port::Port;
 
-use crate::arch::x86_64::serial;
+use crate::arch::x86_64::{cpu, serial};
 use crate::drivers::{console, keyboard, timer};
 use crate::fs::{self, FileSystemError, FileType};
 use crate::mm::{heap, phys};
 
 const DEFAULT_USER: &str = "default";
 const DEFAULT_HOME: &str = "/users/default";
+const DEFAULT_NOTES: &str = "/users/default/documents/notes.txt";
 const KERNEL_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 static FS_READY: AtomicBool = AtomicBool::new(false);
@@ -49,7 +52,7 @@ pub fn run(boot_info: &'static bloader_shared::BootInfo) -> ! {
         print_str(&cwd);
         print_str("# ");
         let line = read_line();
-        exec(&line);
+        exec(&line, boot_info.kernel_uuid);
     }
 }
 
@@ -57,7 +60,7 @@ pub fn run(boot_info: &'static bloader_shared::BootInfo) -> ! {
 // command dispatch
 // ---------------------------------------------------------------------------
 
-fn exec(line: &str) {
+fn exec(line: &str, kernel_uuid: uuid::Uuid) {
     let (toks, redirections) = match tokenize(line).and_then(split_redir) {
         Ok(parsed) => parsed,
         Err(error) => {
@@ -68,11 +71,18 @@ fn exec(line: &str) {
     if toks.is_empty() {
         return;
     }
-    let cmd = toks[0].as_str();
+    let cmd = match toks[0].as_str() {
+        "calculator.sh" | "/applications/calculator.sh" => "calculator",
+        "notepad.sh" | "/applications/notepad.sh" => "notepad",
+        "./calculator.sh" if fs::VFS.lock().get_cwd() == "/applications" => "calculator",
+        "./notepad.sh" if fs::VFS.lock().get_cwd() == "/applications" => "notepad",
+        cmd => cmd,
+    };
     let args: Vec<&str> = toks[1..].iter().map(|s| s.as_str()).collect();
 
     // Interactive commands require direct access to the console.
-    if matches!(cmd, "cd" | "edit" | "reboot" | "halt" | "clear")
+    let interactive_calculator = cmd == "calculator" && args.is_empty();
+    if (interactive_calculator || matches!(cmd, "cd" | "edit" | "notepad" | "reboot" | "halt" | "clear"))
         && (redirections.input.is_some() || redirections.output.is_some())
     {
         print_line("bSH: this command does not support redirection");
@@ -81,6 +91,12 @@ fn exec(line: &str) {
     match cmd {
         "cd" => return cmd_cd(args.first().copied()),
         "edit" => return cmd_edit(&args),
+        "notepad" => return match args.as_slice() {
+            [] => cmd_edit(&["-a", DEFAULT_NOTES]),
+            [path] => cmd_edit(&["-a", path]),
+            _ => print_line("usage: notepad [file]"),
+        },
+        "calculator" if interactive_calculator => return calculator_prompt(),
         "reboot" => {
             print_str("rebooting...\r\n");
             reboot();
@@ -108,7 +124,7 @@ fn exec(line: &str) {
     };
 
     let mut out = String::new();
-    let rc = run_capture(cmd, &args, input.as_deref(), &mut out);
+    let rc = run_capture(cmd, &args, input.as_deref(), kernel_uuid, &mut out);
     if let (0, Some((path, append))) = (rc, redirections.output) {
         let mut vfs = fs::VFS.lock();
         let data = out.replace("\r\n", "\n");
@@ -122,6 +138,33 @@ fn exec(line: &str) {
         }
     } else {
         print_str(&out);
+    }
+}
+
+fn calculator_prompt() {
+    print_line("bOS Calculator. Enter an integer expression or type 'quit'.");
+    loop {
+        print_str("calc> ");
+        let input = read_line();
+        if input.trim() == "quit" {
+            return;
+        }
+        let mut out = String::new();
+        calculate(&input, &mut out);
+        print_str(&out);
+    }
+}
+
+fn calculate(input: &str, out: &mut String) -> i32 {
+    match calculator::evaluate(input) {
+        Ok(value) => {
+            emit(out, &alloc::format!("{}", value));
+            0
+        }
+        Err(error) => {
+            emit(out, &alloc::format!("calculator: {}", error));
+            1
+        }
     }
 }
 
@@ -168,7 +211,13 @@ fn cmd_edit(args: &[&str]) {
 
 /// Execute a command with captured output. Returns exit code.
 /// `stdin_data` is the content of a `< file` redirect, if any.
-fn run_capture(cmd: &str, args: &[&str], stdin_data: Option<&[u8]>, out: &mut String) -> i32 {
+fn run_capture(
+    cmd: &str,
+    args: &[&str],
+    stdin_data: Option<&[u8]>,
+    kernel_uuid: uuid::Uuid,
+    out: &mut String,
+) -> i32 {
     match cmd {
         "" => 0,
         "help" => {
@@ -179,10 +228,19 @@ fn run_capture(cmd: &str, args: &[&str], stdin_data: Option<&[u8]>, out: &mut St
             cmd_info(out);
             0
         }
+        "bfetch" => {
+            cmd_bfetch(kernel_uuid, out);
+            0
+        }
+        "bitstat" => {
+            emit(out, &alloc::format!("bOS: {}-bit (x86_64)", usize::BITS));
+            0
+        }
         "uname" => {
             cmd_uname(args, out);
             0
         }
+        "calculator" => calculate(&args.join(" "), out),
         "echo" => {
             emit(out, &args.join(" "));
             0
@@ -367,7 +425,12 @@ fn cmd_help(topic: Option<&str>, out: &mut String) {
         ("help", "help [cmd] — this text or details for one command"),
         ("info", "info — full system info"),
         ("uname", "uname [-a] — system name"),
+        ("bitstat", "bitstat — show the kernel bitness"),
+        ("bfetch", "bfetch — show a system summary"),
+        ("calculator", "calculator [expression] — integer arithmetic (+ - * / %)"),
+        ("calculator.sh", "calculator.sh — alias for the built-in calculator"),
         ("edit", "edit [-a] <file> — enter new text or append with -a"),
+        ("notepad", "notepad [file] — append to a file, defaults to documents/notes.txt"),
         ("echo", "echo <text...> — print arguments (supports > >>)"),
         ("pwd", "pwd — print working directory"),
         ("whoami", "whoami — show the current user"),
@@ -413,6 +476,29 @@ fn cmd_help(topic: Option<&str>, out: &mut String) {
             None => emit(out, &alloc::format!("help: no such command '{}'", t)),
         },
     }
+}
+
+fn cmd_bfetch(kernel_uuid: uuid::Uuid, out: &mut String) {
+    let mut brand = [0; 48];
+    let processor = cpu::brand_name(&mut brand).unwrap_or("x86_64");
+    let mounts = fs::VFS.lock().mounts();
+    let root_fs = mounts.iter().find(|mount| mount.mount_point == "/")
+        .map(|mount| mount.fs_type.as_str()).unwrap_or("unmounted");
+    let display = match console::resolution() {
+        Some((width, height)) => alloc::format!("{}x{} (GOP)", width, height),
+        None => String::from("serial console"),
+    };
+
+    emit(out, &alloc::format!("             {}@bOS", DEFAULT_USER));
+    emit(out, "             -----------");
+    emit(out, &alloc::format!("  +------+  OS: bOS {} (UEFI)", KERNEL_VERSION));
+    emit(out, &alloc::format!("  | bOS  |  Kernel: bos_kernel {} ({}-bit x86_64)", KERNEL_VERSION, usize::BITS));
+    emit(out, "  | >_   |  Shell: bSH");
+    emit(out, &alloc::format!("  +------+  CPU: {}", processor));
+    emit(out, &alloc::format!("             Memory: {} / {} MiB", phys::used_memory() >> 20, phys::total_memory() >> 20));
+    emit(out, &alloc::format!("             Root filesystem: {}", root_fs));
+    emit(out, &alloc::format!("             Kernel UUID: {}", kernel_uuid));
+    emit(out, &alloc::format!("             Display: {}", display));
 }
 
 fn cmd_info(out: &mut String) {

@@ -38,9 +38,12 @@ The outputs are `target/bos-live.iso` and `target/bos-install.iso`. Boot the **L
 help
 whoami
 pwd
+bitstat
+bfetch
+calculator 2 + 3 * 4
 ls /
 cd documents
-edit -a notes.txt
+notepad
 ```
 
 Type a line in the editor, then `.save` to write it or `.quit` to discard it. Run `cat notes.txt` to read the file. Use `cd` to return home.
@@ -77,7 +80,7 @@ python3 scripts/mkiso.py --install
 
 Образы появятся в `target/bos-live.iso` и `target/bos-install.iso`. **Live ISO** загружается как UEFI CD-ROM. **Install ISO** содержит скрипт для установки на отдельный накопитель из Linux. См. [инструкцию по установке](docs/INSTALL.md).
 
-В bSH попробуйте `help`, `whoami`, `pwd` и `ls /`. Для записи заметки откройте `edit -a documents/notes.txt`, введите текст и завершите командой `.save`. Команда `cd` возвращает в домашний каталог.
+В bSH попробуйте `help`, `whoami`, `pwd` и `ls /`. Команда `bitstat` показывает разрядность ядра bOS, а `bfetch` выводит версию ОС, процессор, память и параметры консоли. Введите `calculator.sh` для запуска встроенного калькулятора или `calculator 2 + 3 * 4` для одного вычисления. В интерактивном режиме команда `quit` возвращает в bSH. Для записи заметки откройте `notepad`, введите текст и завершите командой `.save`. Команда `cd` возвращает в домашний каталог.
 
 Подробнее об устройстве системы см. в [описании архитектуры](docs/ARCH.md).
 
@@ -148,3 +151,14 @@ cargo +stable build -p bpt -p bnet -p btext
 ## Шрифт консоли
 
 Встроенная таблица глифов сгенерирована из `Lat15-VGA16.psf.gz` пакета `console-setup-linux`. Скрипт генерации находится в [scripts/genfont.py](scripts/genfont.py).
+
+## bitstat on Linux / bitstat в Linux
+
+The standalone utility reports the running x86 Linux kernel architecture. In bSH, `bitstat` reports the bOS kernel architecture.
+
+Утилита показывает разрядность запущенного ядра Linux на x86. В bSH одноимённая команда показывает разрядность bOS.
+
+```sh
+cc -std=c11 -Wall -Wextra bitstat.c -o bitstat
+./bitstat
+```

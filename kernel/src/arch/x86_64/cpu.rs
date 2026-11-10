@@ -346,6 +346,22 @@ pub fn cpu_features() -> CpuFeatures {
     features
 }
 
+/// Read the processor brand string if extended CPUID supplies one.
+pub fn brand_name(buffer: &mut [u8; 48]) -> Option<&str> {
+    const FIRST_LEAF: u32 = 0x8000_0002;
+    if cpuid(0x8000_0000).eax < FIRST_LEAF + 2 {
+        return None;
+    }
+    for (index, chunk) in buffer.chunks_exact_mut(16).enumerate() {
+        let regs = cpuid(FIRST_LEAF + index as u32);
+        for (field, value) in chunk.chunks_exact_mut(4).zip([regs.eax, regs.ebx, regs.ecx, regs.edx]) {
+            field.copy_from_slice(&value.to_le_bytes());
+        }
+    }
+    let name = core::str::from_utf8(buffer.split(|byte| *byte == 0).next()?).ok()?.trim();
+    (!name.is_empty() && name.bytes().all(|byte| byte.is_ascii_graphic() || byte == b' ')).then_some(name)
+}
+
 /// CPUID instruction wrapper
 fn cpuid(eax: u32) -> CpuidResult {
     let r = unsafe { core::arch::x86_64::__cpuid(eax) };

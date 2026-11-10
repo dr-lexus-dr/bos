@@ -90,6 +90,14 @@ pub fn is_fb_on() -> bool {
     FB_ON.load(Ordering::SeqCst) != 0
 }
 
+pub fn resolution() -> Option<(u32, u32)> {
+    if !is_fb_on() {
+        return None;
+    }
+    let dimensions = FB_WH.load(Ordering::SeqCst);
+    Some((dimensions >> 16, dimensions & 0xFFFF))
+}
+
 pub fn print(s: &str) {
     crate::arch::x86_64::serial::write_str(s);
     if !is_fb_on() {
