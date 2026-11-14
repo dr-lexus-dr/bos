@@ -179,8 +179,9 @@
 
 **Задачи:**
 
-- [ ] **ADR-001: syscall ABI.** Выбрать `SYSCALL/SYSRET` (MSR STAR/LSTAR/FMASK, swapgs), `int 0x80` оставить для совместимости. Зафиксировать номера, структуры, коды ошибок в `docs/abi.md`.
-- [ ] **ADR-002: модель создания процессов.** Рекомендация: сначала `spawn(path, argv, env, fds)` + `wait`, без `fork`; пайпы через `pipe` + `dup2` + `spawn`. `fork` с COW — позже, если понадобится.
+- [x] **ADR-001: syscall ABI.** Выбран `SYSCALL/SYSRET` (MSR STAR/LSTAR/FMASK, swapgs), `int 0x80` остаётся для совместимости. См. [docs/adr/0001-syscall-abi.md](adr/0001-syscall-abi.md).
+- [ ] **docs/abi.md.** Зафиксировать номера, структуры и коды ошибок syscall ABI до начала libbos.
+- [x] **ADR-002: модель создания процессов.** Выбран `spawn(path, argv, env, fds)` + `wait`, без `fork`; пайпы через `pipe` + `dup2` + `spawn`. `fork` с COW — позже, если понадобится. См. [docs/adr/0002-process-creation.md](adr/0002-process-creation.md).
 - [ ] Включить `sched`: настоящий context switch (asm), idle thread, преемпция по таймеру, sleep/wake, приоритеты; stress-тест на 1 час.
 - [ ] Включить `proc`: таблица PID, process/thread, fd table, cwd, argv/env, exit/zombie/reap, `wait`.
 - [ ] `spawn/exec/wait/exit`, `pipe`, `dup2`, `kill`; Ctrl-C (SIGINT).
@@ -405,8 +406,8 @@
 
 - [ ] Crash-log + `dmesg` ring buffer.
 - [ ] `bootstat`.
-- [ ] Написать `docs/abi.md` (черновик) и ADR-001 (SYSCALL vs int 0x80).
-- [ ] ADR-002 (spawn vs fork).
+- [x] Написать ADR-001 (SYSCALL vs int 0x80); `docs/abi.md` остаётся отдельной задачей M1.
+- [x] ADR-002 (spawn vs fork).
 
 **Неделя 2**
 

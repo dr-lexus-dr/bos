@@ -132,6 +132,7 @@ bash scripts/release.sh
 
 ## 7. Следующий шаг
 
-M1 из [ROADMAP.md](ROADMAP.md): ADR-001 (syscall ABI), ADR-002 (модель
-процессов), реальный планировщик, таблица процессов и PID 1 в ring 3.
-Без M1 остальные milestone'ы не приближают к 75/100.
+M1 из [ROADMAP.md](ROADMAP.md): ADR-001 (syscall ABI) и ADR-002 (модель
+процессов) приняты. Следующий шаг — `docs/abi.md`, реальный планировщик,
+таблица процессов и PID 1 в ring 3. Без M1 остальные milestone'ы не
+приближают к 75/100.
