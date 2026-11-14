@@ -164,14 +164,7 @@ if [[ "$SKIP_BOOTLOADER" -eq 0 || "$SKIP_KERNEL" -eq 0 || "$SKIP_INITRD" -eq 0 ]
             -cf "$ESP/EFI/bOS/initrd.img" \
             applications/calculator.bh applications/notepad.bh \
             system/init.sh system/bpt system/bpm system/network system/text-editor \
-            users/default/.profile -C target/user --transform='s,^hello\.bh$,applications/hello.bh,' hello.bh \
-            -C target/user applications/shell.bh
-        tar --format=ustar --mtime=@0 --owner=0 --group=0 \
-            -cf "$ESP/EFI/bOS/initrd.img" \
-            applications/calculator.bh applications/notepad.bh \
-            system/init.sh system/bpt system/bpm system/network system/text-editor \
-            users/default/.profile -C target/user --transform='s,^hello\.bh$,applications/hello.bh,' hello.bh \\
-            -C target/user applications/shell.bh
+            users/default/.profile -C target/user --transform='s,^hello\.bh$,applications/hello.bh,' hello.bh applications/shell.bh
     fi
 
     log "ESP contents:"

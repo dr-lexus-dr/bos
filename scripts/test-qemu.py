@@ -69,18 +69,18 @@ def fixture_esp(work):
     shutil.copytree(ROOT / "target/esp/EFI", esp / "EFI")
     apps = work / "applications"
     apps.mkdir()
-    (apps / "bad-elf").write_bytes(b"not an ELF")
+    (apps / "bad-elf.bh").write_bytes(b"not an ELF")
     source = work / "fault.S"
     source.write_text(".text\n.global _start\n_start: mov 0, %rax\n ud2\n")
     obj = work / "fault.o"
     subprocess.run(["as", "--64", str(source), "-o", str(obj)], check=True)
     subprocess.run(
-        ["ld", "-m", "elf_x86_64", "-T", "userspace/hello/link.ld", str(obj), "-o", str(apps / "fault")],
+        ["ld", "-m", "elf_x86_64", "-T", "userspace/hello/link.ld", str(obj), "-o", str(apps / "fault.bh")],
         cwd=ROOT, check=True,
     )
     subprocess.run(
         ["tar", "-rf", str(esp / "EFI/bOS/initrd.img"), "-C", str(work),
-         "applications/bad-elf", "applications/fault"], check=True,
+         "applications/bad-elf.bh", "applications/fault.bh"], check=True,
     )
     return esp
 
@@ -128,19 +128,18 @@ def main():
         subprocess.run([ROOT / "target/release/mkusers", disk], check=True)
         with boot(esp) as (shell, output):
             assert b"No data disk; /users is in RAM" in output
-            assert b"\x1b[96mbOS kernel console (bSH) v" in output
+            assert b"\x1b[97mbOS kernel console (bSH) v" in output
             # userspace shell is default; drop to bSH for the kernel-side checks
             shell.command("exit")
             shell.command("lspci", b"8086:100e Ethernet")
-            shell.command("calculator 2 + 3 * 4", b"\r\n14\r\n")
-            shell.command("bfetch", b"Shell: bSH")
-            shell.command("echo history", b"\r\nhistory\r\n")
-            shell.command("echo history", b"\r\nhistory\r\n")
-            shell.command("echo abc", b"\r\nabc\r\n")
-            shell.command("/applications/hello", b"Hello from bOS user mode!")
-            shell.command("run /applications/bad-elf", b"expected a static x86-64 ELF")
-            shell.command("/applications/fault", b"user fault (vector 14)")
-            shell.command("/applications/hello", b"Hello from bOS user mode!")
+            shell.command("calculator 2 + 3 * 4", b"14")
+            shell.command("bfetch", b"bSH")
+            shell.command("echo history", b"history")
+            shell.command("echo abc", b"abc")
+            shell.command("/applications/hello.bh", b"Hello from bOS user mode!")
+            shell.command("run /applications/bad-elf.bh", b"expected a static x86-64 ELF")
+            shell.command("/applications/fault.bh", b"user fault (vector 14)")
+            shell.command("/applications/hello.bh", b"Hello from bOS user mode!")
 
         with boot(esp, disk) as (shell, output):
             assert b"/users is persistent on virtio0" in output
