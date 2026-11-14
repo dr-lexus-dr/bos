@@ -249,7 +249,7 @@ impl Vfs {
         Self {
             filesystems: Vec::new(),
             mounts: Vec::new(),
-            file_handles: Vec::new(),
+            file_handles: alloc::vec![None, None, None],
             cwd: String::from("/"),
         }
     }
@@ -495,7 +495,7 @@ impl Vfs {
 
         let file = mount.fs.open(&relative_path, flags)?;
 
-        for (i, handle) in self.file_handles.iter_mut().enumerate() {
+        for (i, handle) in self.file_handles.iter_mut().enumerate().skip(3) {
             if handle.is_none() {
                 *handle = Some(file);
                 return Ok(i as u32);

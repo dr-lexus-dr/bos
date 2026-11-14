@@ -116,6 +116,18 @@ else
     log "[2/4] bootloader skipped"
 fi
 
+# --- 2b. userspace shell (bossh) -----------------------------------------------
+if [[ "$SKIP_KERNEL" -eq 0 ]]; then
+    log "userspace shell (bossh -> x86_64-unknown-none/$PROFILE)..."
+    (cd "$ROOT/userspace/bossh" && cargo +nightly-2025-06-01 build --locked $CARGO_PROFILE_FLAG --target x86_64-unknown-none) \
+        || die "bossh build failed"
+    BOSsh="$ROOT/userspace/bossh/target/x86_64-unknown-none/$PROFILE/bossh"
+    [[ -f "$BOSsh" ]] || die "bossh artifact missing: $BOSsh"
+    mkdir -p "$ROOT/target/user"
+    cp -f "$BOSsh" "$ROOT/target/user/shell.bh"
+    log "bossh OK: $BOSsh"
+fi
+
 # --- 3. kernel -----------------------------------------------------------------
 if [[ "$SKIP_KERNEL" -eq 0 ]]; then
     log "[3/4] kernel (bos_kernel -> $KERNEL_TARGET/$PROFILE)..."
@@ -146,11 +158,20 @@ if [[ "$SKIP_BOOTLOADER" -eq 0 || "$SKIP_KERNEL" -eq 0 || "$SKIP_INITRD" -eq 0 ]
         mkdir -p target/user
         as --64 userspace/hello/start.S -o target/user/hello.o
         ld -m elf_x86_64 -T userspace/hello/link.ld target/user/hello.o -o target/user/hello.bh
+        mkdir -p target/user/applications
+        cp -f target/user/shell.bh target/user/applications/shell.bh 2>/dev/null || true
         tar --format=ustar --mtime=@0 --owner=0 --group=0 \
             -cf "$ESP/EFI/bOS/initrd.img" \
             applications/calculator.bh applications/notepad.bh \
             system/init.sh system/bpt system/bpm system/network system/text-editor \
-            users/default/.profile -C target/user --transform='s,^hello\.bh$,applications/hello.bh,' hello.bh
+            users/default/.profile -C target/user --transform='s,^hello\.bh$,applications/hello.bh,' hello.bh \
+            -C target/user applications/shell.bh
+        tar --format=ustar --mtime=@0 --owner=0 --group=0 \
+            -cf "$ESP/EFI/bOS/initrd.img" \
+            applications/calculator.bh applications/notepad.bh \
+            system/init.sh system/bpt system/bpm system/network system/text-editor \
+            users/default/.profile -C target/user --transform='s,^hello\.bh$,applications/hello.bh,' hello.bh \\
+            -C target/user applications/shell.bh
     fi
 
     log "ESP contents:"

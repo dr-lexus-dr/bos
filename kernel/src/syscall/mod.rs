@@ -46,6 +46,7 @@ const ENOENT: u64 = 2;
 const EBADF: u64 = 9;
 const EACCES: u64 = 13;
 const EEXIST: u64 = 17;
+const EFAULT: u64 = 14;
 const ENOTDIR: u64 = 20;
 const EISDIR: u64 = 21;
 const EINVAL: u64 = 22;
@@ -83,13 +84,44 @@ fn fs_err(e: crate::fs::FileSystemError) -> u64 {
     })
 }
 
+// User address space window (must match kernel/src/user.rs: USER_BASE..STACK_TOP).
+const USER_SPACE_START: u64 = 0x80_0000_0000;
+const USER_SPACE_END: u64 = 0x80_0050_0000; // generous upper bound incl. stack guard
+
+/// Validate that [ptr, ptr+len) lies entirely inside the user address space.
+fn check_user_range(ptr: u64, len: u64) -> Result<(), u64> {
+    if len == 0 {
+        // a null pointer with zero length is acceptable (no access)
+        if ptr == 0 {
+            return Ok(());
+        }
+    }
+    // reject null when length is non-zero
+    if ptr == 0 && len != 0 {
+        return Err(err(EINVAL));
+    }
+    let end = match ptr.checked_add(len) {
+        Some(e) => e,
+        None => return Err(err(EINVAL)), // overflow
+    };
+    if ptr < USER_SPACE_START || end > USER_SPACE_END {
+        return Err(err(EFAULT));
+    }
+    Ok(())
+}
+
 /// Read a NUL-terminated user string, capped at 4096 bytes.
 fn user_str(ptr: u64) -> Result<alloc::string::String, u64> {
     if ptr == 0 {
         return Err(err(EINVAL));
     }
+    check_user_range(ptr, 1)?;
     let mut out = alloc::string::String::new();
     for i in 0..4096usize {
+        // ensure we never read past the user window
+        if ptr as usize + i >= USER_SPACE_END as usize {
+            return Err(err(ENAMETOOLONG));
+        }
         let b = unsafe { core::ptr::read_volatile((ptr as usize + i) as *const u8) };
         if b == 0 {
             return Ok(out);
@@ -100,9 +132,10 @@ fn user_str(ptr: u64) -> Result<alloc::string::String, u64> {
 }
 
 fn user_slice<'a>(ptr: u64, len: u64) -> Result<&'a [u8], u64> {
-    if ptr == 0 && len != 0 {
-        return Err(err(EINVAL));
+    if len == 0 {
+        return Ok(&[]);
     }
+    check_user_range(ptr, len)?;
     if len > 16 * 1024 * 1024 {
         return Err(err(EINVAL));
     }
@@ -110,9 +143,10 @@ fn user_slice<'a>(ptr: u64, len: u64) -> Result<&'a [u8], u64> {
 }
 
 fn user_slice_mut<'a>(ptr: u64, len: u64) -> Result<&'a mut [u8], u64> {
-    if ptr == 0 && len != 0 {
-        return Err(err(EINVAL));
+    if len == 0 {
+        return Ok(&mut []);
     }
+    check_user_range(ptr, len)?;
     if len > 16 * 1024 * 1024 {
         return Err(err(EINVAL));
     }
@@ -142,7 +176,10 @@ pub fn dispatch(nr: u64, a1: u64, a2: u64, a3: u64, _a4: u64, _a5: u64) -> u64 {
         SYS_WRITE => {
             // fd=a1, buf=a2, len=a3. fds 1/2 go to console; other fds to VFS.
             if a1 == 1 || a1 == 2 {
-                let bytes = unsafe { core::slice::from_raw_parts(a2 as *const u8, a3 as usize) };
+                let bytes = match user_slice(a2, a3) {
+                    Ok(s) => s,
+                    Err(e) => return e,
+                };
                 crate::drivers::console::print(core::str::from_utf8(bytes).unwrap_or("?"));
                 return a3;
             }
