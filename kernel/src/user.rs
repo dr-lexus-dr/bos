@@ -29,6 +29,10 @@ use crate::{
 };
 
 const PAGE: u64 = 4096;
+
+extern "C" {
+    static mut saved_user_return_stack: u64;
+}
 const USER_BASE: u64 = 0x80_0000_0000; // PML4 slot 1, separate from the kernel identity map
 const IMAGE_END: u64 = USER_BASE + 4 * 1024 * 1024;
 const STACK_TOP: u64 = IMAGE_END + 5 * PAGE;
@@ -80,11 +84,10 @@ impl Program {
         let old = Cr3::read().0.start_address().as_u64() as *const PageTable;
         let new = root.start_address().as_u64() as *mut PageTable;
         unsafe {
-            if !(&*old)[1].is_unused() {
-                return Err("user address space is unavailable");
-            }
-            // Keep the existing supervisor-only mappings, including the low kernel mapping.
+            // Copy the whole kernel page table (including higher-half mappings),
+            // then clear the user slot (1) so the new program gets a fresh space.
             ptr::copy_nonoverlapping(old, new, 1);
+            ptr::write_bytes(&mut (*new)[1] as *mut _ as *mut u8, 0, 8);
         }
         Ok(Self {
             frames,
@@ -172,6 +175,28 @@ impl Program {
         }
         Ok(())
     }
+
+    fn write_user(&self, address: u64, input: &[u8]) -> Result<(), ()> {
+        let mut address = address;
+        let mut offset = 0;
+        while offset < input.len() {
+            let page = address & !(PAGE - 1);
+            let (_, frame) = self
+                .pages
+                .iter()
+                .find(|(base, _)| *base == page)
+                .ok_or(())?;
+            let local = address - page;
+            let length = ((PAGE - local) as usize).min(input.len() - offset);
+            let dest = (frame.start_address().as_u64() + local) as *mut u8;
+            unsafe {
+                ptr::copy_nonoverlapping(input.as_ptr().add(offset), dest, length);
+            }
+            address += length as u64;
+            offset += length;
+        }
+        Ok(())
+    }
 }
 
 pub fn run(data: &[u8]) -> Result<i64, &'static str> {
@@ -195,6 +220,9 @@ pub fn run(data: &[u8]) -> Result<i64, &'static str> {
     let (previous_root, flags) = Cr3::read();
     let cr0 = Cr0::read();
     let efer = Efer::read();
+    let saved_active = ACTIVE.load(Ordering::Acquire);
+    // Save the global user-return stack pointer so nested runs don't clobber it.
+    let saved_return_stack = unsafe { saved_user_return_stack };
     ACTIVE.store(ptr::addr_of_mut!(program), Ordering::Release);
     let status = unsafe {
         // This ABI uses int 0x80 only. Deny user FPU access until context switching exists.
@@ -207,7 +235,8 @@ pub fn run(data: &[u8]) -> Result<i64, &'static str> {
         Efer::write(efer);
         status
     };
-    ACTIVE.store(ptr::null_mut(), Ordering::Release);
+    unsafe { saved_user_return_stack = saved_return_stack; }
+    ACTIVE.store(saved_active, Ordering::Release);
     Ok(status)
 }
 
@@ -228,13 +257,40 @@ extern "C" fn dispatch_user_syscall(number: u64, arg0: u64, arg1: u64, arg2: u64
         return -38;
     }
     match number {
+        0 => {
+            if arg2 == 0 { return 0; }
+            if arg2 > 4096 { return -22; }
+            let mut buf = [0u8; 4096];
+            let n = if arg0 == 0 {
+                // stdin: read from serial (blocking until newline or len)
+                let mut i = 0usize;
+                while i < arg2 as usize {
+                    let b = loop {
+                        crate::drivers::net::poll();
+                        if let Some(b) = crate::arch::x86_64::serial::try_read_byte() {
+                            break b;
+                        }
+                        core::hint::spin_loop();
+                    };
+                    buf[i] = b;
+                    i += 1;
+                    if b == b'\n' || b == b'\r' { break; }
+                }
+                i
+            } else {
+                match crate::fs::VFS.lock().read(arg0 as u32, &mut buf[..arg2 as usize]) {
+                    Ok(n) => n,
+                    Err(_) => return -9,
+                }
+            };
+            if unsafe { (*active).write_user(arg1, &buf[..n]) }.is_err() {
+                return -14;
+            }
+            n as i64
+        }
         1 => {
-            if !matches!(arg0, 1 | 2) {
-                return -9;
-            }
-            if arg2 > 4096 {
-                return -22;
-            }
+            if !matches!(arg0, 1 | 2) { return -9; }
+            if arg2 > 4096 { return -22; }
             let mut buffer = [0; 4096];
             let output = &mut buffer[..arg2 as usize];
             if unsafe { (*active).read_user(arg1, output) }.is_err() {
@@ -250,6 +306,202 @@ extern "C" fn dispatch_user_syscall(number: u64, arg0: u64, arg1: u64, arg2: u64
                 }
             }
             arg2 as i64
+        }
+        2 => {
+            let mut path = alloc::string::String::new();
+            let mut i = 0usize;
+            loop {
+                if i >= 4096 { return -36; }
+                let mut b = [0u8; 1];
+                if unsafe { (*active).read_user(arg0 + i as u64, &mut b) }.is_err() {
+                    return -14;
+                }
+                if b[0] == 0 { break; }
+                path.push(b[0] as char);
+                i += 1;
+            }
+            match crate::fs::VFS.lock().open(&path, arg1 as u32) {
+                Ok(fd) => fd as i64,
+                Err(_) => -2,
+            }
+        }
+        3 => {
+            match crate::fs::VFS.lock().close(arg0 as u32) {
+                Ok(()) => 0,
+                Err(_) => -9,
+            }
+        }
+        4 => {
+            let mut path = alloc::string::String::new();
+            let mut i = 0usize;
+            loop {
+                if i >= 4096 { return -36; }
+                let mut b = [0u8; 1];
+                if unsafe { (*active).read_user(arg0 + i as u64, &mut b) }.is_err() {
+                    return -14;
+                }
+                if b[0] == 0 { break; }
+                path.push(b[0] as char);
+                i += 1;
+            }
+            match crate::fs::VFS.lock().stat(&path) {
+                Ok(st) => st.size as i64,
+                Err(_) => -2,
+            }
+        }
+        79 => {
+            let cwd = crate::fs::VFS.lock().get_cwd();
+            let bytes = cwd.as_bytes();
+            let n = bytes.len().min(arg1 as usize);
+            if unsafe { (*active).write_user(arg0, &bytes[..n]) }.is_err() {
+                return -14;
+            }
+            if n < arg1 as usize {
+                let _ = unsafe { (*active).write_user(arg0 + n as u64, &[0]) };
+            }
+            n as i64
+        }
+        80 => {
+            let mut path = alloc::string::String::new();
+            let mut i = 0usize;
+            loop {
+                if i >= 4096 { return -36; }
+                let mut b = [0u8; 1];
+                if unsafe { (*active).read_user(arg0 + i as u64, &mut b) }.is_err() {
+                    return -14;
+                }
+                if b[0] == 0 { break; }
+                path.push(b[0] as char);
+                i += 1;
+            }
+            match crate::fs::VFS.lock().set_cwd(&path) {
+                Ok(()) => 0,
+                Err(_) => -2,
+            }
+        }
+        59 => {
+            // SYS_EXEC: path=arg0
+            let mut path = alloc::string::String::new();
+            let mut i = 0usize;
+            loop {
+                if i >= 4096 { return -36; }
+                let mut b = [0u8; 1];
+                if unsafe { (*active).read_user(arg0 + i as u64, &mut b) }.is_err() {
+                    return -14;
+                }
+                if b[0] == 0 { break; }
+                path.push(b[0] as char);
+                i += 1;
+            }
+            let data = match crate::fs::VFS.lock().read_file(&path) {
+                Ok(d) => d,
+                Err(_) => return -2,
+            };
+            let saved = ACTIVE.load(Ordering::Acquire);
+            ACTIVE.store(core::ptr::null_mut(), Ordering::Release);
+            let res = crate::user::run(&data);
+            ACTIVE.store(saved, Ordering::Release);
+            match res {
+                Ok(s) => s,
+                Err(_) => -8,
+            }
+        }
+        82 => {
+            // SYS_RENAME: from=arg0, to=arg1
+            // read from
+            let mut from = alloc::string::String::new();
+            let mut i = 0usize;
+            loop {
+                if i >= 4096 { return -36; }
+                let mut b = [0u8;1];
+                if unsafe { (*active).read_user(arg0 + i as u64, &mut b) }.is_err() { return -14; }
+                if b[0]==0 { break; }
+                from.push(b[0] as char); i+=1;
+            }
+            let mut to = alloc::string::String::new();
+            let mut i = 0usize;
+            loop {
+                if i >= 4096 { return -36; }
+                let mut b = [0u8;1];
+                if unsafe { (*active).read_user(arg1 + i as u64, &mut b) }.is_err() { return -14; }
+                if b[0]==0 { break; }
+                to.push(b[0] as char); i+=1;
+            }
+            match crate::fs::VFS.lock().rename(&from, &to) {
+                Ok(()) => 0,
+                Err(_) => -2,
+            }
+        }
+        83 => {
+            // SYS_MKDIR: path=arg0
+            let mut path = alloc::string::String::new();
+            let mut i = 0usize;
+            loop {
+                if i >= 4096 { return -36; }
+                let mut b = [0u8;1];
+                if unsafe { (*active).read_user(arg0 + i as u64, &mut b) }.is_err() { return -14; }
+                if b[0]==0 { break; }
+                path.push(b[0] as char); i+=1;
+            }
+            match crate::fs::VFS.lock().mkdir(&path) {
+                Ok(()) => 0,
+                Err(_) => -2,
+            }
+        }
+        84 | 87 => {
+            // SYS_RMDIR/UNLINK: path=arg0
+            let mut path = alloc::string::String::new();
+            let mut i = 0usize;
+            loop {
+                if i >= 4096 { return -36; }
+                let mut b = [0u8;1];
+                if unsafe { (*active).read_user(arg0 + i as u64, &mut b) }.is_err() { return -14; }
+                if b[0]==0 { break; }
+                path.push(b[0] as char); i+=1;
+            }
+            match crate::fs::VFS.lock().remove(&path) {
+                Ok(()) => 0,
+                Err(_) => -2,
+            }
+        }
+        1000 => {
+            // SYS_LISTDIR: path=arg0, buf=arg1, size=arg2
+            let mut path = alloc::string::String::new();
+            let mut i = 0usize;
+            loop {
+                if i >= 4096 { return -36; }
+                let mut b = [0u8;1];
+                if unsafe { (*active).read_user(arg0 + i as u64, &mut b) }.is_err() { return -14; }
+                if b[0]==0 { break; }
+                path.push(b[0] as char); i+=1;
+            }
+            let entries = match crate::fs::VFS.lock().list_dir(&path) {
+                Ok(e) => e,
+                Err(_) => return -2,
+            };
+            let mut out = alloc::string::String::new();
+            for e in entries {
+                out.push_str(&e.name);
+                out.push('\n');
+            }
+            let bytes = out.as_bytes();
+            let n = bytes.len().min(arg2 as usize);
+            if unsafe { (*active).write_user(arg1, &bytes[..n]) }.is_err() { return -14; }
+            n as i64
+        }
+        1004 => {
+            // SYS_BSH_EXEC: execute a bSH command line in kernel context
+            let mut cmd = alloc::string::String::new();
+            let mut i = 0usize;
+            loop {
+                if i >= 4096 { return -36; }
+                let mut b = [0u8;1];
+                if unsafe { (*active).read_user(arg0 + i as u64, &mut b) }.is_err() { return -14; }
+                if b[0]==0 { break; }
+                cmd.push(b[0] as char); i+=1;
+            }
+            crate::bsh::exec_line(&cmd);
+            0
         }
         60 => unsafe { leave_user((arg0 & 0xff) as i64) },
         _ => -38,

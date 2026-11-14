@@ -10,29 +10,14 @@ done
 # --- legacy fallback (host checks without the Rust binary) ---
 echo "bOS Network Tools"
 echo "================="
-if command -v curl &>/dev/null; then
-    echo "curl is available"
-else
-    echo "curl not found, installing..."
-    if command -v apt-get &>/dev/null; then
-        apt-get update && apt-get install -y curl
-    elif command -v yum &>/dev/null; then
-        yum install -y curl
-    fi
-fi
+echo "bnet binary not built; using host tools (read-only, no auto-install)."
+echo "Build with: cargo build -p bnet"
 echo ""
 echo "Checking internet connectivity..."
 if ping -c 1 -W 3 8.8.8.8 &>/dev/null; then
     echo "✓ Internet connection is available"
 else
     echo "✗ No internet connection detected"
-fi
-echo ""
-echo "Checking DNS resolution..."
-if curl -s --connect-timeout 5 https://www.google.com > /dev/null 2>&1; then
-    echo "✓ DNS and HTTPS connectivity works"
-else
-    echo "✗ DNS or HTTPS connectivity failed"
 fi
 echo ""
 echo "Network interfaces:"

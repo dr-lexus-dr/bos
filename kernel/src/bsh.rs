@@ -28,11 +28,15 @@ const DEFAULT_HOME: &str = "/users/default";
 const DEFAULT_NOTES: &str = "/users/default/documents/notes.txt";
 const KERNEL_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+use spin::Mutex;
+static KERNEL_UUID: Mutex<Option<uuid::Uuid>> = Mutex::new(None);
+
 pub fn run(boot_info: &'static bloader_shared::BootInfo) -> ! {
     info!("bSH: built-in console ready (polling serial + PS/2)");
     console::init(boot_info.framebuffer);
     console::clear();
     crate::arch::x86_64::speaker_beep(660, 90);
+    *KERNEL_UUID.lock() = Some(boot_info.kernel_uuid);
     let storage = fs::init(boot_info);
     crate::drivers::net::init();
     cmd_cd(None);
@@ -49,6 +53,10 @@ pub fn run(boot_info: &'static bloader_shared::BootInfo) -> ! {
         let _color = ColorGuard::new(Color::Yellow);
         print_line("warning: the previous boot ended in a kernel panic; run 'crashlog' to read it");
     }
+    let shell_present = fs::VFS.lock().stat("/applications/shell.bh").is_ok();
+    if shell_present {
+        run_program("/applications/shell.bh");
+    }
     let mut history = line::History::new();
     loop {
         let cwd = fs::VFS.lock().get_cwd();
@@ -61,6 +69,13 @@ pub fn run(boot_info: &'static bloader_shared::BootInfo) -> ! {
 // ---------------------------------------------------------------------------
 // command dispatch
 // ---------------------------------------------------------------------------
+
+pub fn exec_line(line: &str) {
+    crate::drivers::net::poll();
+    let uuid = KERNEL_UUID.lock().unwrap_or(uuid::Uuid::nil());
+    exec(line, uuid);
+    crate::drivers::net::poll();
+}
 
 fn exec(line: &str, kernel_uuid: uuid::Uuid) {
     let (toks, redirections) = match tokenize(line).and_then(split_redir) {
@@ -76,6 +91,7 @@ fn exec(line: &str, kernel_uuid: uuid::Uuid) {
     let cmd = match toks[0].as_str() {
         "calculator.bh" | "/applications/calculator.bh" => "calculator",
         "notepad.bh" | "/applications/notepad.bh" => "notepad",
+        "sh" | "shell" => "/applications/shell.bh",
         "./calculator.bh" if fs::VFS.lock().get_cwd() == "/applications" => "calculator",
         "./notepad.bh" if fs::VFS.lock().get_cwd() == "/applications" => "notepad",
         cmd => cmd,
@@ -578,6 +594,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("babo", "babo [file] — full-screen editor (Ctrl+S save, Ctrl+Q quit)"),
     ("edit", "edit [-a] <file> — enter new text or append with -a"),
     ("run", "run <program.bh> — launch a bOS user program"),
+    ("sh", "sh — launch the userspace shell (/applications/shell.bh)"),
     ("notepad", "notepad [file] — append to a file, defaults to documents/notes.txt"),
     ("echo", "echo <text...> — print arguments (supports > >>)"),
     ("pwd", "pwd — print working directory"),
