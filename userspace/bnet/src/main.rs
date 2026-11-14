@@ -45,6 +45,19 @@ fn main() -> Result<()> {
             let output = args.get(3).cloned();
             download_file(&args[2], output)?;
         }
+        "wget" => {
+            if args.len() < 3 {
+                eprintln!("Usage: bnet wget <url> [-O output-file]");
+                return Ok(());
+            }
+            let output = match args.get(3).map(String::as_str) {
+                None => None,
+                Some("-O") => Some(args.get(4).context("-O requires an output filename")?.clone()),
+                Some(path) => Some(path.to_owned()),
+            };
+            download_file(&args[2], output)?;
+        }
+        "git" => git_command(&args[2..])?,
         "check" | "connectivity" => check_connectivity()?,
         "ifconfig" | "interfaces" => show_interfaces()?,
         "port" | "scan" => {
@@ -80,10 +93,25 @@ fn print_usage() {
     println!("  dns <hostname>           Resolve DNS for hostname");
     println!("  http <url>               Make HTTP GET request");
     println!("  download <url> [file]    Download file from URL");
+    println!("  wget <url> [-O file]     Download a file (wget-compatible syntax)");
+    println!("  git [args...]            Run Git on the Linux host");
     println!("  interfaces               Show network interfaces");
     println!("  port <host> <port>       Check if TCP port is open");
     println!("  traceroute <host>        Trace route to host");
     println!("  help                     Show this help");
+}
+
+/// Git requires Git to be installed on the Linux host. Forward arguments and
+/// exit status unchanged so normal commands such as clone, pull and status work.
+fn git_command(args: &[String]) -> Result<()> {
+    let status = std::process::Command::new("git")
+        .args(args)
+        .status()
+        .context("could not start git; install Git on the Linux host")?;
+    if !status.success() {
+        anyhow::bail!("git exited with {status}");
+    }
+    Ok(())
 }
 
 fn check_connectivity() -> Result<()> {

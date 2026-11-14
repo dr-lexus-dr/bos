@@ -43,8 +43,9 @@ static mut MAP_BUF: [MemoryRegion; MAX_MAP_ENTRIES] = [MemoryRegion {
 }; MAX_MAP_ENTRIES];
 
 /// Static backing for the frame bitmap (same no-heap constraint as above).
-/// 65536 words = 512 KiB .bss, covers 16 GiB of RAM.
-const MAX_BITMAP_WORDS: usize = 65536;
+/// 262144 words = 2 MiB .bss, covers 64 GiB of RAM.  The previous 16 GiB cap
+/// made a 32 GiB QEMU guest panic during boot with "frame bitmap needs ...".
+const MAX_BITMAP_WORDS: usize = 262_144;
 static mut BITMAP_BUF: [u64; MAX_BITMAP_WORDS] = [0; MAX_BITMAP_WORDS];
 
 /// Bitmap allocator for frames

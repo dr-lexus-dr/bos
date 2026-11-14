@@ -29,7 +29,8 @@ impl History {
     }
 }
 
-enum Key {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Key {
     Text(char),
     Enter,
     Backspace,
@@ -39,6 +40,11 @@ enum Key {
     Up,
     Down,
     Tab,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    Control(u8),
 }
 
 #[derive(Clone, Copy)]
@@ -54,6 +60,10 @@ struct Input {
     after_cr: bool,
     extended: bool,
     shifts: u8,
+    controls: u8,
+    utf8: [u8; 4],
+    utf8_length: usize,
+    utf8_expected: usize,
 }
 
 static INPUT: Mutex<Input> = Mutex::new(Input {
@@ -61,14 +71,22 @@ static INPUT: Mutex<Input> = Mutex::new(Input {
     after_cr: false,
     extended: false,
     shifts: 0,
+    controls: 0,
+    utf8: [0; 4],
+    utf8_length: 0,
+    utf8_expected: 0,
 });
 
+pub(super) fn key() -> Key {
+    INPUT.lock().next_key(true)
+}
+
 impl Input {
-    fn next_key(&mut self) -> Key {
+    fn next_key(&mut self, unicode: bool) -> Key {
         loop {
             crate::drivers::net::poll();
             if let Some(byte) = serial::try_read_byte() {
-                if let Some(key) = self.serial(byte) {
+                if let Some(key) = self.serial(byte, unicode) {
                     return key;
                 }
             }
@@ -81,7 +99,33 @@ impl Input {
         }
     }
 
-    fn serial(&mut self, byte: u8) -> Option<Key> {
+    fn serial(&mut self, byte: u8, unicode: bool) -> Option<Key> {
+        if unicode && byte >= 0x80 {
+            if self.utf8_length == 0 {
+                self.utf8_expected = match byte {
+                    0xc2..=0xdf => 2,
+                    0xe0..=0xef => 3,
+                    0xf0..=0xf4 => 4,
+                    _ => return None,
+                };
+            } else if byte & 0xc0 != 0x80 {
+                self.utf8_length = 0;
+                self.utf8_expected = 0;
+                return None;
+            }
+            self.utf8[self.utf8_length] = byte;
+            self.utf8_length += 1;
+            if self.utf8_length == self.utf8_expected {
+                self.utf8_length = 0;
+                return core::str::from_utf8(&self.utf8[..self.utf8_expected])
+                    .ok()?
+                    .chars()
+                    .next()
+                    .map(Key::Text);
+            }
+            return None;
+        }
+        self.utf8_length = 0;
         if byte == 0x1b {
             self.escape = Escape::Start;
             self.after_cr = false;
@@ -101,7 +145,16 @@ impl Input {
             }
             Escape::Ss3 => return arrow(byte),
             Escape::Csi { param, modified } => match byte {
-                b'~' if param == 3 => return Some(Key::Delete),
+                b'~' => {
+                    return match param {
+                        1 | 7 => Some(Key::Home),
+                        3 => Some(Key::Delete),
+                        4 | 8 => Some(Key::End),
+                        5 => Some(Key::PageUp),
+                        6 => Some(Key::PageDown),
+                        _ => None,
+                    }
+                }
                 0x40..=0x7e => return arrow(byte),
                 b'0'..=b'9' if !modified => {
                     self.escape = Escape::Csi {
@@ -127,6 +180,7 @@ impl Input {
             b'\r' | b'\n' => Some(Key::Enter),
             b'\t' => Some(Key::Tab),
             0x08 | 0x7f => Some(Key::Backspace),
+            1..=26 => Some(Key::Control(b'a' + byte - 1)),
             0x20..=0x7e => Some(Key::Text(byte as char)),
             _ => None,
         }
@@ -139,6 +193,18 @@ impl Input {
         }
         if core::mem::take(&mut self.extended) {
             return match code {
+                0x1d => {
+                    self.controls |= 2;
+                    None
+                }
+                0x9d => {
+                    self.controls &= !2;
+                    None
+                }
+                0x47 => Some(Key::Home),
+                0x4f => Some(Key::End),
+                0x49 => Some(Key::PageUp),
+                0x51 => Some(Key::PageDown),
                 0x48 => Some(Key::Up),
                 0x50 => Some(Key::Down),
                 0x4b => Some(Key::Left),
@@ -149,6 +215,8 @@ impl Input {
             };
         }
         match code {
+            0x1d => self.controls |= 1,
+            0x9d => self.controls &= !1,
             0x2a => self.shifts |= 1,
             0x36 => self.shifts |= 2,
             0xaa => self.shifts &= !1,
@@ -156,7 +224,15 @@ impl Input {
             0x1c => return Some(Key::Enter),
             0x0e => return Some(Key::Backspace),
             0x0f => return Some(Key::Tab),
-            _ => return decode(code, self.shifts != 0).map(Key::Text),
+            _ => {
+                return decode(code, self.shifts != 0).map(|ch| {
+                    if self.controls != 0 && ch.is_ascii_alphabetic() {
+                        Key::Control(ch.to_ascii_lowercase() as u8)
+                    } else {
+                        Key::Text(ch)
+                    }
+                })
+            }
         }
         None
     }
@@ -168,6 +244,8 @@ fn arrow(byte: u8) -> Option<Key> {
         b'B' => Some(Key::Down),
         b'C' => Some(Key::Right),
         b'D' => Some(Key::Left),
+        b'H' => Some(Key::Home),
+        b'F' => Some(Key::End),
         _ => None,
     }
 }
@@ -179,11 +257,12 @@ pub(super) fn read(prompt: &str, history: Option<&History>) -> String {
     let commands = history.map_or(&[][..], |history| history.0.as_slice());
     let mut position = commands.len();
     let mut draft = (String::new(), 0);
-    print_str(prompt);
+    console::print_colored(prompt, console::Color::Green);
+    let _input_color = console::ColorGuard::new(console::Color::White);
 
     loop {
         console::toggle_input_cursor();
-        let key = input.next_key();
+        let key = input.next_key(false);
         console::toggle_input_cursor();
         match key {
             Key::Enter => {
@@ -360,14 +439,14 @@ fn complete(prompt: &str, line: &mut String, cursor: &mut usize) {
     if matches.len() > 1 && common <= word.len() {
         print_str("\r\n");
         for candidate in matches.iter().take(24) {
-            print_str(candidate);
+            console::print_colored(candidate, console::Color::Blue);
             print_str("  ");
         }
         if matches.len() > 24 {
             print_str("...");
         }
         print_str("\r\n");
-        print_str(prompt);
+        console::print_colored(prompt, console::Color::Green);
         print_str(line);
         back(line.len() - *cursor);
         return;

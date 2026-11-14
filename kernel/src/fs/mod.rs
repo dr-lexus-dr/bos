@@ -12,6 +12,7 @@ pub mod ramfs;
 use alloc::vec::Vec;
 use alloc::string::{String, ToString};
 use alloc::boxed::Box;
+use core::sync::atomic::{AtomicBool, Ordering};
 use log::info;
 use lazy_static::lazy_static;
 
@@ -373,6 +374,16 @@ impl Vfs {
         normalize_path(&self.cwd, path)
     }
 
+    pub fn realpath(&self, path: &str) -> Result<String, FileSystemError> {
+        self.follow(&self.abspath(path)?, 0)
+    }
+
+    pub fn sync_path(&self, path: &str) -> Result<(), FileSystemError> {
+        let path = self.realpath(path)?;
+        let (mount, _) = self.resolve_path(&path).ok_or(FileSystemError::NotFound)?;
+        mount.fs.sync()
+    }
+
     fn resolve_path(&self, path: &str) -> Option<(&MountPoint, String)> {
         // `path` must already be absolute+canonical.
         let mut best: Option<&MountPoint> = None;
@@ -712,6 +723,41 @@ lazy_static! {
     pub static ref VFS: spin::Mutex<Vfs> = spin::Mutex::new(Vfs::new());
 }
 
+/// Set once `/users` is mounted.  Panic handling is best-effort: writing a
+/// crash log before the VFS exists would only fault again.
+static CRASH_LOG_READY: AtomicBool = AtomicBool::new(false);
+const CRASH_LOG_PATH: &str = "/users/.crash.log";
+
+/// Persist a kernel panic to the data disk so the next boot can report it.
+/// Deliberately uses `try_lock`: if the VFS lock is held by the faulting
+/// thread, skipping the write is better than deadlocking in the panic path.
+pub fn persist_crash_log(message: &str) {
+    if !CRASH_LOG_READY.load(Ordering::Acquire) {
+        return;
+    }
+    let Some(mut vfs) = VFS.try_lock() else {
+        return;
+    };
+    let payload = alloc::format!("bOS kernel panic\n{}\n", message);
+    let _ = vfs.write_file(CRASH_LOG_PATH, payload.as_bytes());
+    let _ = vfs.sync();
+}
+
+/// Read a crash log left by a previous boot, if any.
+pub fn read_crash_log() -> Option<String> {
+    let mut vfs = VFS.try_lock()?;
+    let data = vfs.read_file(CRASH_LOG_PATH).ok()?;
+    Some(String::from_utf8_lossy(&data).into_owned())
+}
+
+/// Remove the persisted crash log after an operator has read it.
+pub fn clear_crash_log() -> bool {
+    let Some(vfs) = VFS.try_lock() else {
+        return false;
+    };
+    vfs.remove(CRASH_LOG_PATH).is_ok()
+}
+
 /// Initialize VFS: ramfs on `/` + skeleton dirs, initrd tarball imported.
 pub fn init(boot_info: &bloader_shared::BootInfo) -> &'static str {
     // Register known FS types, then mount a fresh ramfs at /.
@@ -773,6 +819,9 @@ pub fn init(boot_info: &bloader_shared::BootInfo) -> &'static str {
             "Data disk unavailable; /users is in RAM"
         }
     };
+    if storage.contains("persistent") {
+        CRASH_LOG_READY.store(true, Ordering::Release);
+    }
     info!("VFS initialized");
     storage
 }

@@ -145,12 +145,12 @@ if [[ "$SKIP_BOOTLOADER" -eq 0 || "$SKIP_KERNEL" -eq 0 || "$SKIP_INITRD" -eq 0 ]
         need ld
         mkdir -p target/user
         as --64 userspace/hello/start.S -o target/user/hello.o
-        ld -m elf_x86_64 -T userspace/hello/link.ld target/user/hello.o -o target/user/hello
+        ld -m elf_x86_64 -T userspace/hello/link.ld target/user/hello.o -o target/user/hello.bh
         tar --format=ustar --mtime=@0 --owner=0 --group=0 \
             -cf "$ESP/EFI/bOS/initrd.img" \
-            applications/calculator.sh applications/notepad.sh \
+            applications/calculator.bh applications/notepad.bh \
             system/init.sh system/bpt system/bpm system/network system/text-editor \
-            users/default/.profile -C target/user --transform='s,^hello$,applications/hello,' hello
+            users/default/.profile -C target/user --transform='s,^hello\.bh$,applications/hello.bh,' hello.bh
     fi
 
     log "ESP contents:"

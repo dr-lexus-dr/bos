@@ -121,6 +121,52 @@ pub fn resolution() -> Option<(u32, u32)> {
     Some((dimensions >> 16, dimensions & 0xFFFF))
 }
 
+/// Shell colors shared by the serial terminal and GOP renderer.
+#[derive(Clone, Copy)]
+#[repr(u8)]
+pub enum Color {
+    Red = 91,
+    Green = 92,
+    Yellow = 93,
+    Blue = 94,
+    White = 97,
+}
+
+static FOREGROUND: AtomicU8 = AtomicU8::new(Color::White as u8);
+
+fn foreground(code: u8) {
+    print(match code {
+        91 => "\x1b[91m",
+        92 => "\x1b[92m",
+        93 => "\x1b[93m",
+        94 => "\x1b[94m",
+        _ => "\x1b[97m",
+    });
+}
+
+/// Restore the surrounding color when interactive commands or errors return.
+pub struct ColorGuard(u8);
+
+impl ColorGuard {
+    pub fn new(color: Color) -> Self {
+        let previous = FOREGROUND.swap(color as u8, Ordering::SeqCst);
+        foreground(color as u8);
+        Self(previous)
+    }
+}
+
+impl Drop for ColorGuard {
+    fn drop(&mut self) {
+        FOREGROUND.store(self.0, Ordering::SeqCst);
+        foreground(self.0);
+    }
+}
+
+pub fn print_colored(text: &str, color: Color) {
+    let _color = ColorGuard::new(color);
+    print(text);
+}
+
 pub fn print(s: &str) {
     crate::arch::x86_64::serial::write_str(s);
     if !is_fb_on() {
@@ -130,6 +176,56 @@ pub fn print(s: &str) {
     for ch in s.chars() {
         putc(&mut fb, ch);
     }
+}
+
+/// A shared viewport that fits an ordinary 80x24 serial terminal.
+pub fn editor_dimensions() -> (usize, usize) {
+    match resolution() {
+        Some((width, height)) => ((width as usize / 8).min(80), (height as usize / 16).min(24)),
+        None => (80, 24),
+    }
+}
+
+pub fn begin_editor() {
+    crate::arch::x86_64::serial::write_str("\x1b[?1049h\x1b[?25l");
+    clear();
+}
+
+pub fn end_editor() {
+    if is_fb_on() {
+        clear_fb();
+        let mut fb = FB.lock();
+        fb.x = 0;
+        fb.y = 0;
+    }
+    crate::arch::x86_64::serial::write_str("\x1b[0m\x1b[?25h\x1b[?1049l");
+}
+
+pub fn editor_cursor(row: usize, column: usize) {
+    crate::arch::x86_64::serial::write_str(&alloc::format!("\x1b[{};{}H", row + 1, column + 1));
+    if is_fb_on() {
+        let mut fb = FB.lock();
+        fb.y = (row as u32).min(fb.height / 16 - 1);
+        fb.x = (column as u32).min(fb.width / 8 - 1);
+    }
+}
+
+pub fn editor_row(row: usize, text: &str) {
+    editor_cursor(row, 0);
+    crate::arch::x86_64::serial::write_str("\x1b[K");
+    if is_fb_on() {
+        let fb = FB.lock();
+        let start = row * 16 * fb.stride as usize;
+        if row < (fb.height / 16) as usize {
+            fill(unsafe { (fb.base as *mut u32).add(start) }, 16 * fb.stride as usize, fb.pixel(0));
+        }
+    }
+    print(text);
+}
+
+pub fn editor_caret(visible: bool) {
+    crate::arch::x86_64::serial::write_str(if visible { "\x1b[?25h" } else { "\x1b[?25l" });
+    toggle_input_cursor();
 }
 
 /// Toggle a cursor underline while the line editor is waiting for input.

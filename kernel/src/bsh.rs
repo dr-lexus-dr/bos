@@ -8,6 +8,7 @@
 //! classic bring-up commands (`help`, `info`, `uname`, `mem`, ...).
 
 mod calculator;
+mod babo;
 mod line;
 
 use alloc::string::{String, ToString};
@@ -18,6 +19,7 @@ use x86_64::instructions::port::Port;
 
 use crate::arch::x86_64::{cpu, serial};
 use crate::drivers::{console, timer};
+use crate::drivers::console::{Color, ColorGuard};
 use crate::fs::{self, FileSystemError, FileType};
 use crate::mm::{heap, phys};
 
@@ -34,11 +36,19 @@ pub fn run(boot_info: &'static bloader_shared::BootInfo) -> ! {
     let storage = fs::init(boot_info);
     crate::drivers::net::init();
     cmd_cd(None);
-    print_str("\x1b[96mbOS kernel console (bSH) v");
+    print_str("\x1b[97mbOS kernel console (bSH) v");
     print_str(KERNEL_VERSION);
     print_str("\x1b[0m");
     print_str(" — type 'help'\r\n");
-    print_line(storage);
+    {
+        let _color = ColorGuard::new(if storage.contains("persistent") { Color::Green } else { Color::Yellow });
+        print_line(storage);
+    }
+    print_str(&alloc::format!("\x1b[90mboot: {} ms\x1b[0m\r\n", crate::boottime::elapsed_ms()));
+    if fs::read_crash_log().is_some() {
+        let _color = ColorGuard::new(Color::Yellow);
+        print_line("warning: the previous boot ended in a kernel panic; run 'crashlog' to read it");
+    }
     let mut history = line::History::new();
     loop {
         let cwd = fs::VFS.lock().get_cwd();
@@ -56,7 +66,7 @@ fn exec(line: &str, kernel_uuid: uuid::Uuid) {
     let (toks, redirections) = match tokenize(line).and_then(split_redir) {
         Ok(parsed) => parsed,
         Err(error) => {
-            print_line(error);
+            print_error(error);
             return;
         }
     };
@@ -64,44 +74,47 @@ fn exec(line: &str, kernel_uuid: uuid::Uuid) {
         return;
     }
     let cmd = match toks[0].as_str() {
-        "calculator.sh" | "/applications/calculator.sh" => "calculator",
-        "notepad.sh" | "/applications/notepad.sh" => "notepad",
-        "./calculator.sh" if fs::VFS.lock().get_cwd() == "/applications" => "calculator",
-        "./notepad.sh" if fs::VFS.lock().get_cwd() == "/applications" => "notepad",
+        "calculator.bh" | "/applications/calculator.bh" => "calculator",
+        "notepad.bh" | "/applications/notepad.bh" => "notepad",
+        "./calculator.bh" if fs::VFS.lock().get_cwd() == "/applications" => "calculator",
+        "./notepad.bh" if fs::VFS.lock().get_cwd() == "/applications" => "notepad",
         cmd => cmd,
     };
     let args: Vec<&str> = toks[1..].iter().map(|s| s.as_str()).collect();
 
     if cmd == "run" || cmd.starts_with('/') || cmd.starts_with("./") || cmd.starts_with("../") {
         if redirections.input.is_some() || redirections.output.is_some() {
-            print_line("run: redirection is unavailable for user programs");
+            print_error("run: redirection is unavailable for user programs");
             return;
         }
         let path = match (cmd, args.as_slice()) {
             ("run", [path]) => *path,
-            ("run", _) => return print_line("usage: run <ELF path>"),
+            ("run", _) => return print_error("usage: run <program.bh>"),
             (path, []) => path,
-            _ => return print_line("run: arguments are unavailable for user programs"),
+            _ => return print_error("run: arguments are unavailable for user programs"),
         };
         run_program(path);
         return;
     }
 
+    let _color = ColorGuard::new(command_color(cmd));
+
     // Interactive commands require direct access to the console.
     let interactive_calculator = cmd == "calculator" && args.is_empty();
-    if (interactive_calculator || matches!(cmd, "cd" | "edit" | "notepad" | "reboot" | "halt" | "clear"))
+    if (interactive_calculator || matches!(cmd, "cd" | "edit" | "babo" | "notepad" | "reboot" | "halt" | "clear"))
         && (redirections.input.is_some() || redirections.output.is_some())
     {
-        print_line("bSH: this command does not support redirection");
+        print_error("bSH: this command does not support redirection");
         return;
     }
     match cmd {
         "cd" => return cmd_cd(args.first().copied()),
         "edit" => return cmd_edit(&args),
+        "babo" => return babo::run(&args),
         "notepad" => return match args.as_slice() {
             [] => cmd_edit(&["-a", DEFAULT_NOTES]),
             [path] => cmd_edit(&["-a", path]),
-            _ => print_line("usage: notepad [file]"),
+            _ => print_error("usage: notepad [file]"),
         },
         "calculator" if interactive_calculator => return calculator_prompt(),
         "reboot" => {
@@ -124,7 +137,7 @@ fn exec(line: &str, kernel_uuid: uuid::Uuid) {
             match result {
                 Ok(data) => Some(data),
                 Err(error) => {
-                    print_line(&alloc::format!("bSH: {}: {}", path, fs_err(error)));
+                    print_error(&alloc::format!("bSH: {}: {}", path, fs_err(error)));
                     return;
                 }
             }
@@ -143,21 +156,54 @@ fn exec(line: &str, kernel_uuid: uuid::Uuid) {
             vfs.write_file(&path, data.as_bytes())
         };
         if let Err(error) = result {
-            print_line(&alloc::format!("bSH: {}: {}", path, fs_err(error)));
+            print_error(&alloc::format!("bSH: {}: {}", path, fs_err(error)));
         }
     } else {
-        print_str(&out);
+        print_output(cmd, rc, &out);
+    }
+}
+
+fn command_color(command: &str) -> Color {
+    match command {
+        "calculator" => Color::Yellow,
+        "cat" | "head" | "tail" | "echo" => Color::White,
+        "ls" | "find" | "pwd" | "readlink" => Color::Blue,
+        "mem" | "df" | "du" | "wc" | "stat" => Color::Yellow,
+        "help" | "info" | "uname" | "bitstat" | "lspci" | "ifconfig" | "ping" => Color::White,
+        "dmesg" | "bootstat" | "crashlog" => Color::White,
+        _ => Color::Green,
+    }
+}
+
+fn print_output(command: &str, status: i32, output: &str) {
+    let _color = ColorGuard::new(if status == 0 { command_color(command) } else { Color::Red });
+    if command != "bfetch" || status != 0 {
+        print_str(output);
+        return;
+    }
+    for line in output.split_inclusive('\n') {
+        if let Some((label, value)) = line.split_once(": ") {
+            console::print_colored(label, Color::Blue);
+            console::print_colored(": ", Color::Blue);
+            console::print_colored(value, Color::White);
+        } else {
+            console::print_colored(line, Color::Green);
+        }
     }
 }
 
 fn run_program(path: &str) {
+    let _color = ColorGuard::new(Color::Green);
+    if !path.ends_with(".bh") {
+        return print_error("run: bOS programs must use the .bh extension");
+    }
     let data = {
         let mut vfs = fs::VFS.lock();
         match vfs.stat(path) {
             Ok(stat) if stat.is_dir() || stat.size > 4 * 1024 * 1024 => {
-                return print_line("run: expected an ELF file no larger than 4 MiB");
+                return print_error("run: expected an ELF file no larger than 4 MiB");
             }
-            Err(error) => return print_line(&alloc::format!("run: {}: {}", path, fs_err(error))),
+            Err(error) => return print_error(&alloc::format!("run: {}: {}", path, fs_err(error))),
             _ => {}
         }
         vfs.read_file(path)
@@ -165,11 +211,11 @@ fn run_program(path: &str) {
     match data {
         Ok(data) => match crate::user::run(&data) {
             Ok(0) => {}
-            Ok(status) if status > 0 => print_line(&alloc::format!("run: exited with status {}", status)),
-            Ok(status) => print_line(&alloc::format!("run: user fault (vector {})", -status - 1)),
-            Err(error) => print_line(&alloc::format!("run: {}", error)),
+            Ok(status) if status > 0 => print_error(&alloc::format!("run: exited with status {}", status)),
+            Ok(status) => print_error(&alloc::format!("run: user fault (vector {})", -status - 1)),
+            Err(error) => print_error(&alloc::format!("run: {}", error)),
         },
-        Err(error) => print_line(&alloc::format!("run: {}: {}", path, fs_err(error))),
+        Err(error) => print_error(&alloc::format!("run: {}: {}", path, fs_err(error))),
     }
 }
 
@@ -181,8 +227,8 @@ fn calculator_prompt() {
             return;
         }
         let mut out = String::new();
-        calculate(&input, &mut out);
-        print_str(&out);
+        let status = calculate(&input, &mut out);
+        print_output("calculator", status, &out);
     }
 }
 
@@ -203,7 +249,7 @@ fn cmd_edit(args: &[&str]) {
     let (path, append) = match args {
         [path] => (*path, false),
         ["-a", path] => (*path, true),
-        _ => return print_line("usage: edit [-a] <file>"),
+        _ => return print_error("usage: edit [-a] <file>"),
     };
     print_line(if append {
         "Appending text. .save writes, .quit discards."
@@ -226,8 +272,11 @@ fn cmd_edit(args: &[&str]) {
                     }
                 };
                 match result {
-                    Ok(()) => return print_line("Saved."),
-                    Err(error) => print_line(&alloc::format!("edit: {}: {}", path, fs_err(error))),
+                    Ok(()) => {
+                        console::print_colored("Saved.\r\n", Color::Green);
+                        return;
+                    },
+                    Err(error) => print_error(&alloc::format!("edit: {}: {}", path, fs_err(error))),
                 }
             }
             _ => {
@@ -281,6 +330,41 @@ fn run_capture(
         }
         "uname" => {
             cmd_uname(args, out);
+            0
+        }
+        "dmesg" => {
+            let clear = args.iter().any(|a| *a == "-c" || *a == "--clear");
+            let log = crate::logger::dmesg(clear);
+            if log.is_empty() {
+                emit(out, "dmesg: kernel log is empty");
+            } else {
+                out.push_str(&log.replace('\n', "\r\n"));
+            }
+            0
+        }
+        "bootstat" => {
+            emit(
+                out,
+                &alloc::format!(
+                    "boot: {} ms; tsc: {} ticks/ms; dmesg: {} bytes",
+                    crate::boottime::elapsed_ms(),
+                    crate::boottime::tsc_per_ms(),
+                    crate::logger::dmesg_len(),
+                ),
+            );
+            0
+        }
+        "crashlog" => {
+            let clear = args.iter().any(|a| *a == "-c" || *a == "--clear");
+            match fs::read_crash_log() {
+                Some(log) => {
+                    out.push_str(&log.replace("\r\n", "\n").replace('\n', "\r\n"));
+                    if clear && !fs::clear_crash_log() {
+                        emit(out, "crashlog: could not remove the crash log");
+                    }
+                }
+                None => emit(out, "crashlog: no persisted kernel panic"),
+            }
             0
         }
         "calculator" => calculate(&args.join(" "), out),
@@ -340,7 +424,14 @@ fn run_capture(
             0
         }
         "uptime" => {
-            emit(out, &alloc::format!("ticks: {}", timer::ticks()));
+            emit(
+                out,
+                &alloc::format!(
+                    "ticks: {}; boot: {} ms",
+                    timer::ticks(),
+                    crate::boottime::elapsed_ms()
+                ),
+            );
             0
         }
         c => {
@@ -474,15 +565,19 @@ const COMMANDS: &[(&str, &str)] = &[
     ("help", "help [cmd] — this text or details for one command"),
     ("info", "info — full system info"),
     ("uname", "uname [-a] — system name"),
+    ("dmesg", "dmesg [-c] — print or clear the kernel ring buffer"),
+    ("bootstat", "bootstat — boot time, TSC calibration and dmesg size"),
+    ("crashlog", "crashlog [-c] — read or clear the previous kernel panic"),
     ("bitstat", "bitstat — show the kernel bitness"),
     ("bfetch", "bfetch — show a system summary"),
     ("lspci", "lspci — list PCI devices and hardware IDs"),
     ("ifconfig", "ifconfig [dhcp | static <IPv4/prefix> [gateway]] — configure eth0"),
     ("ping", "ping <IPv4 address> — send one ICMP echo request"),
     ("calculator", "calculator [expression] — integer arithmetic (+ - * / %)"),
-    ("calculator.sh", "calculator.sh — alias for the built-in calculator"),
+    ("calculator.bh", "calculator.bh — built-in calculator alias"),
+    ("babo", "babo [file] — full-screen editor (Ctrl+S save, Ctrl+Q quit)"),
     ("edit", "edit [-a] <file> — enter new text or append with -a"),
-    ("run", "run <ELF path> — launch a bOS user program"),
+    ("run", "run <program.bh> — launch a bOS user program"),
     ("notepad", "notepad [file] — append to a file, defaults to documents/notes.txt"),
     ("echo", "echo <text...> — print arguments (supports > >>)"),
     ("pwd", "pwd — print working directory"),
@@ -511,7 +606,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("chmod", "chmod <oct> <path...> — change permission bits"),
     ("find", "find [path] [-name pat] [-type f|d|l] — walk tree"),
     ("mem", "mem — memory stats"),
-    ("uptime", "uptime — timer ticks"),
+    ("uptime", "uptime — timer ticks and boot time"),
     ("clear", "clear — clear screen"),
     ("reboot", "reboot — reset via 8042"),
     ("halt", "halt — cli + hlt"),
@@ -594,6 +689,8 @@ fn cmd_info(out: &mut String) {
     );
     emit(out, &alloc::format!("  Heap:      {} KiB total, {} KiB used", htotal / 1024, hused / 1024));
     emit(out, "== Kernel ==");
+    emit(out, &alloc::format!("  Boot:      {} ms (TSC {} ticks/ms)", crate::boottime::elapsed_ms(), crate::boottime::tsc_per_ms()));
+    emit(out, &alloc::format!("  Dmesg:     {} bytes buffered", crate::logger::dmesg_len()));
     emit(out, "  Subsystems: GDT/IDT/PIC/APIC, phys+heap+paging, sched, VFS+bFS");
     emit(out, "  Syscalls:   0/1/2/3/4/8, 12/35/39/57/59/60, 76/79/80/82-84/87-90, 1000-1003");
 }
@@ -726,7 +823,7 @@ fn cmd_cd(arg: Option<&str>) {
     let target = arg.unwrap_or(DEFAULT_HOME);
     match fs::VFS.lock().set_cwd(target) {
         Ok(()) => {}
-        Err(e) => print_line(&alloc::format!("cd: {}: {}", target, fs_err(e))),
+        Err(e) => print_error(&alloc::format!("cd: {}: {}", target, fs_err(e))),
     }
 }
 
@@ -1905,11 +2002,16 @@ fn print_line(s: &str) {
     console::print("\r\n");
 }
 
+fn print_error(message: &str) {
+    let _color = ColorGuard::new(Color::Red);
+    print_line(message);
+}
+
 fn sync_before_shutdown() -> bool {
     match fs::VFS.lock().sync() {
         Ok(()) => true,
         Err(error) => {
-            print_line(&alloc::format!("sync: {}; shutdown canceled", fs_err(error)));
+            print_error(&alloc::format!("sync: {}; shutdown canceled", fs_err(error)));
             false
         }
     }

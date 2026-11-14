@@ -1,6 +1,7 @@
 //! bPT installs files and packages from GitHub into the bOS workspace.
 
 use anyhow::{anyhow, bail, Context, Result};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
@@ -189,7 +190,7 @@ fn lock_state(root: &Path) -> Result<fs::File> {
         .truncate(false)
         .write(true)
         .open(state.join("lock"))?;
-    file.lock().context("locking bPT state")?;
+    file.lock_exclusive().context("locking bPT state")?;
     Ok(file)
 }
 

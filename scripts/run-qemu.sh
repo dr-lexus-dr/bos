@@ -3,7 +3,7 @@ set -e
 # bOS: run in QEMU (UEFI via OVMF). Usage: run-qemu.sh [esp-dir] [users.img]
 ESP="${1:-target/esp}"
 OVMF_CODE="${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
-MEMORY="${BOS_MEMORY:-4G}"
+MEMORY="${BOS_MEMORY:-1G}"
 if [[ "$MEMORY" =~ ^([0-9]+)([kMGTPE])B$ ]]; then
   MEMORY="${BASH_REMATCH[1]}${BASH_REMATCH[2]}"
 fi

@@ -38,7 +38,7 @@ bincode = "1.3"
 
 # Filesystem
 byteorder = "1.5"
-crc32fast = "1.3"
+crc32fast = "=1.4.2"
 uuid = { version = "=1.6.0", default-features = false, features = ["serde"] }
 
 # Async
@@ -54,6 +54,9 @@ sha2 = "0.10"
 crossterm = { version = "0.27", features = ["use-dev-tty"] }
 url = "2.5"
 toml = "0.8"
+
+# Host file locking
+fs2 = "0.4"
 
 # Logging
 log = "0.4"

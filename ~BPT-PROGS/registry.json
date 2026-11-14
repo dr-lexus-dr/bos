@@ -6,9 +6,9 @@
       "description": "Print a greeting from bPT",
       "category": "utilities",
       "repo": "dr-lexus-dr/bos",
-      "ref": "bpt-v0.1.0",
+      "ref": "main",
       "path": "~BPT-PROGS/hello",
-      "bin": ["hello.sh"]
+      "bin": ["hello.bh"]
     },
     {
       "name": "sysinfo",
@@ -16,9 +16,9 @@
       "description": "Show the Linux host kernel and architecture",
       "category": "utilities",
       "repo": "dr-lexus-dr/bos",
-      "ref": "bpt-v0.1.0",
+      "ref": "main",
       "path": "~BPT-PROGS/sysinfo",
-      "bin": ["sysinfo.sh"]
+      "bin": ["sysinfo.bh"]
     }
   ]
 }

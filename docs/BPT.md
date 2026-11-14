@@ -10,7 +10,7 @@ bPT управляет пакетами в рабочей папке bOS из Li
 cargo +stable build --locked --release -p bpt
 system/bpt update
 system/bpt install hello sysinfo
-applications/hello/hello.sh
+applications/hello/hello.bh
 system/bpt show hello
 system/bpt remove hello
 ```
@@ -59,14 +59,14 @@ Put the package in `~BPT-PROGS/<name>/` and add an entry to `~BPT-PROGS/registry
   "repo": "dr-lexus-dr/bos",
   "ref": "bpt-v0.1.0",
   "path": "~BPT-PROGS/hello",
-  "bin": ["hello.sh"],
+  "bin": ["hello.bh"],
   "requires": []
 }
 ```
 
-`path` can point to a file or directory. `bin` lists paths relative to the installed package that should be executable. `requires` lists catalog package names. Optionally set `sha256` to verify the downloaded archive. Use a release tag or commit to pin package contents.
+`path` can point to a file or directory. `bin` lists paths relative to the installed package that should be executable; bOS program files use the `.bh` extension. `requires` lists catalog package names. Optionally set `sha256` to verify the downloaded archive. Use a release tag or commit to pin package contents.
 
-`path` указывает на файл или каталог. `bin` задаёт исполняемые файлы относительно установленного пакета. В `requires` указываются имена зависимостей из каталога. Поле `sha256` позволяет проверить архив. Для фиксации содержимого используйте тег или коммит.
+`path` указывает на файл или каталог. `bin` задаёт исполняемые файлы относительно установленного пакета; программы bOS имеют расширение `.bh`. В `requires` указываются имена зависимостей из каталога. Поле `sha256` позволяет проверить архив. Для фиксации содержимого используйте тег или коммит.
 
 ## Scope / Возможности первой версии
 

@@ -6,7 +6,7 @@
 
 *Загрузитесь в оболочку. Работайте с файлами. Управляйте пакетами GitHub через bPT.*
 
-[English](#english) · [Русский](#русский) · [How to install / Установка](docs/INSTALL.md)
+[English](#english) · [Русский](#русский) · [How to install / Установка](docs/INSTALL.md) · [Status / Статус](docs/STATUS.md) · [Changelog](CHANGELOG.md)
 
 ## English
 
@@ -16,7 +16,23 @@ bOS 0.2.0 can save `/users` to a dedicated bFS disk in QEMU and run a static ELF
 
 bOS 0.3.0 adds ANSI foreground and background colors to the framebuffer console. Use `lspci` to see the PCI IDs of devices detected by bOS.
 
-bOS 0.4.0 adds DHCPv4 and `ping` on the Intel 82540EM. bOS 0.5.0 adds Intel 82574L, Realtek RTL8139 and manual IPv4 configuration.
+bOS 0.4.0 adds DHCPv4 and `ping` on the Intel 82540EM. bOS 0.5.0 adds Intel 82574L, Realtek RTL8139 and manual IPv4 configuration. bOS 0.6.0 adds the M0 reliability baseline: `dmesg`, boot timing, a best-effort crash log, a 64 GiB frame bitmap, repeated QEMU RAM tests, and CI. See the [status matrix](docs/STATUS.md) and [changelog](CHANGELOG.md).
+
+### Boot diagnostics
+
+```text
+dmesg          # kernel log ring (64 KiB)
+dmesg -c       # print and clear the ring
+bootstat       # boot time, TSC frequency, log size
+uptime         # timer ticks and milliseconds since kernel entry
+crashlog       # read a panic persisted by the previous boot
+crashlog -c    # clear it
+```
+
+A crash log is written only after `/users` is mounted. Writing uses a
+non-blocking VFS lock, so a panic while the filesystem is busy may be reported
+on the serial console but not persisted. The current limits are listed in
+[STATUS.md](docs/STATUS.md).
 
 ### Ethernet in bSH
 
@@ -47,14 +63,15 @@ bash scripts/build.sh --release
 bash scripts/run-qemu.sh
 ```
 
-The launcher defaults to 4 GiB and `-cpu max`. Set `BOS_MEMORY` (for example, `512M`) to change RAM or `OVMF_CODE` if the firmware is installed at a different path. For the ISO images, use the same build output:
+The launcher defaults to 1 GiB and `-cpu max`. Set `BOS_MEMORY` (for example, `4G`) to change RAM or `OVMF_CODE` if the firmware is installed at a different path. For the ISO images, use the same build output:
 
 ```sh
 python3 scripts/mkiso.py
 python3 scripts/mkiso.py --install
+bash scripts/release.sh   # versioned ISOs + SHA256SUMS
 ```
 
-The outputs are `target/bos-live.iso` and `target/bos-install.iso`. Boot the **Live ISO** as a UEFI CD-ROM. The **Install ISO** includes a Linux script for installing bOS onto a dedicated drive. See the [installation guide](docs/INSTALL.md).
+The outputs are `target/bos-live.iso` and `target/bos-install.iso`. Release assets land in `target/release-0.6.0/`. Boot the **Live ISO** as a UEFI CD-ROM. The **Install ISO** includes a Linux script for installing bOS onto a dedicated drive. See the [installation guide](docs/INSTALL.md).
 
 ### Save files between reboots
 
@@ -74,13 +91,31 @@ pwd
 bitstat
 bfetch
 calculator 2 + 3 * 4
-/applications/hello
+/applications/hello.bh
 ls /
 cd documents
 notepad
 ```
 
-Type a line in the editor, then `.save` to write it or `.quit` to discard it. Run `cat notes.txt` to read the file. Use `cd` to return home. Up and Down browse command history, Left and Right move the cursor, and Tab completes commands and paths.
+Type a line in the editor, then `.save` to write it or `.quit` to discard it. Run `cat notes.txt` to read the file. Use `cd` to return home. Up and Down browse command history, Left and Right move the cursor, and Tab completes commands and paths. The prompt is green, regular output is white, and blue and yellow highlight details. Errors are red. Colors appear in the serial terminal and on the framebuffer screen.
+
+### babo editor
+
+Run `babo [file]` in bSH. With no filename it opens `/users/default/documents/notes.txt`.
+It provides line numbers, horizontal and vertical scrolling, search, go-to-line,
+undo/redo, line cut/paste, and confirmation before discarding changes.
+UTF-8 text is preserved, and UTF-8 input is accepted over the serial terminal.
+Files can be up to 128 KiB. Saving stages a new file before replacing the original.
+
+| Shortcut | Action |
+| --- | --- |
+| Ctrl+S / Ctrl+O | Save and flush the mounted filesystem |
+| Ctrl+Q / Ctrl+X | Quit |
+| Ctrl+W / Ctrl+N | Search / next match |
+| Ctrl+Z / Ctrl+Y | Undo / redo |
+| Ctrl+K / Ctrl+U | Cut line / paste |
+| Ctrl+G | Go to line |
+| Home / End / PgUp / PgDn | Navigate |
 
 ## Русский
 
@@ -94,11 +129,27 @@ Type a line in the editor, then `.save` to write it or `.quit` to discard it. Ru
 └── applications/   приложения
 ```
 
-В bOS 0.2.0 каталог `/users` можно хранить на отдельном диске bFS в QEMU. Команда `/applications/hello` запускает ELF64 в пользовательском режиме. Без диска данных изменения хранятся в RAM. Утилиты для Linux собираются отдельно.
+В bOS 0.2.0 каталог `/users` можно хранить на отдельном диске bFS в QEMU. Команда `/applications/hello.bh` запускает ELF64 в пользовательском режиме. Исполняемые пользовательские программы bOS используют расширение `.bh`. Без диска данных изменения хранятся в RAM. Утилиты для Linux собираются отдельно.
 
 В bOS 0.3.0 консоль framebuffer отображает 16 цветов ANSI для текста и фона. Команда `lspci` показывает PCI ID устройств, обнаруженных bOS.
 
-В 0.4.0 появились DHCPv4 и `ping` для Intel 82540EM. Версия 0.5.0 добавляет Intel 82574L, Realtek RTL8139 и ручную настройку IPv4.
+В 0.4.0 появились DHCPv4 и `ping` для Intel 82540EM. Версия 0.5.0 добавляет Intel 82574L, Realtek RTL8139 и ручную настройку IPv4. Версия 0.6.0 добавляет базовую диагностику M0: `dmesg`, замер времени загрузки, best-effort crash-log, битмап на 64 ГиБ, повторяемую RAM-матрицу QEMU и CI. См. [матрицу статуса](docs/STATUS.md) и [changelog](CHANGELOG.md).
+
+### Диагностика загрузки
+
+```text
+dmesg          # кольцевой журнал ядра, 64 КиБ
+dmesg -c       # вывести и очистить журнал
+bootstat       # время загрузки, частота TSC, размер журнала
+uptime         # тики таймера и миллисекунды с момента входа в ядро
+crashlog       # прочитать панику, сохранённую предыдущей загрузкой
+crashlog -c    # очистить crash-log
+```
+
+Crash-log записывается только после монтирования `/users`. Запись использует
+неблокирующую блокировку VFS, поэтому паника при занятой файловой системе
+может остаться только в serial-консоли. Актуальные ограничения перечислены в
+[STATUS.md](docs/STATUS.md).
 
 ### Ethernet в bSH
 
@@ -123,14 +174,15 @@ bash scripts/build.sh --release
 bash scripts/run-qemu.sh
 ```
 
-По умолчанию QEMU получает 4 ГиБ и запускается с `-cpu max`. Объём памяти можно задать через `BOS_MEMORY` (например, `512M`), путь к OVMF — через `OVMF_CODE`. Чтобы собрать оба образа:
+По умолчанию QEMU получает 1 ГиБ и запускается с `-cpu max`. Объём памяти можно задать через `BOS_MEMORY` (например, `4G`), путь к OVMF — через `OVMF_CODE`. Чтобы собрать оба образа:
 
 ```sh
 python3 scripts/mkiso.py
 python3 scripts/mkiso.py --install
+bash scripts/release.sh   # версионированные ISO + SHA256SUMS
 ```
 
-Образы появятся в `target/bos-live.iso` и `target/bos-install.iso`. **Live ISO** загружается как UEFI CD-ROM. **Install ISO** содержит скрипт для установки на отдельный накопитель из Linux. См. [инструкцию по установке](docs/INSTALL.md).
+Образы появятся в `target/bos-live.iso` и `target/bos-install.iso`. Релизные файлы — в `target/release-0.6.0/`. **Live ISO** загружается как UEFI CD-ROM. **Install ISO** содержит скрипт для установки на отдельный накопитель из Linux. См. [инструкцию по установке](docs/INSTALL.md).
 
 ### Постоянный диск bFS
 
@@ -141,11 +193,26 @@ bash scripts/run-qemu.sh target/esp target/users.img
 
 Создайте образ один раз и используйте его при следующих запусках. Перед закрытием QEMU выполните `sync`. Команды bSH `reboot` и `halt` также сбрасывают изменения на диск. В 0.2.0 проверен отдельный диск VirtIO в QEMU. bFS кэширует том в RAM и работает без журнала.
 
-В bSH попробуйте `help`, `whoami`, `pwd` и `ls /`. Команда `bitstat` показывает разрядность ядра bOS, а `bfetch` выводит версию ОС, процессор, память и параметры консоли. Введите `calculator.sh` для запуска встроенного калькулятора или `calculator 2 + 3 * 4` для одного вычисления. В интерактивном режиме команда `quit` возвращает в bSH. Для записи заметки откройте `notepad`, введите текст и завершите командой `.save`. Команда `cd` возвращает в домашний каталог. Стрелки вверх и вниз листают историю команд, влево и вправо перемещают курсор. Tab дополняет команды и пути.
+В bSH попробуйте `help`, `whoami`, `pwd` и `ls /`. Команда `bitstat` показывает разрядность ядра bOS, а `bfetch` выводит версию ОС, процессор, память и параметры консоли. Введите `calculator.bh` для запуска встроенного калькулятора или `calculator 2 + 3 * 4` для одного вычисления. В интерактивном режиме команда `quit` возвращает в bSH. Для записи заметки откройте `notepad`, введите текст и завершите командой `.save`. Команда `cd` возвращает в домашний каталог. Стрелки вверх и вниз листают историю команд, влево и вправо перемещают курсор. Tab дополняет команды и пути. Приглашение зелёное, основной текст белый, детали выделяются синим и жёлтым, ошибки красные. Оформление работает в последовательном терминале и на экране framebuffer.
 
-Проверка загрузки, ELF64 и сохранения файлов после перезапуска доступна через `python3 scripts/test-qemu.py` после release-сборки.
+### Редактор babo
 
-Подробнее об устройстве системы см. в [описании архитектуры](docs/ARCH.md).
+Введите `babo [файл]` в bSH. Без имени открываются заметки
+`/users/default/documents/notes.txt`. Редактор показывает номера строк,
+поддерживает прокрутку, поиск, переход к строке, отмену и повтор изменений,
+вырезание и вставку строки. Перед выходом с несохранёнными изменениями
+появляется подтверждение. Ограничение файла — 128 КиБ.
+
+`Ctrl+S` сохраняет, `Ctrl+Q` закрывает, `Ctrl+W` ищет,
+`Ctrl+N` переходит к следующему совпадению, `Ctrl+Z` отменяет,
+`Ctrl+Y` повторяет, `Ctrl+K` вырезает строку, `Ctrl+U` вставляет,
+`Ctrl+G` переходит к строке. Для выбора сохранения или отмены при выходе
+введите `s` или `d` и нажмите Enter. Файлы UTF-8 сохраняются,
+ввод UTF-8 поддерживается через последовательный терминал.
+
+Проверка release-сборки: `bash scripts/test-host.sh`, `python3 scripts/test-qemu.py` и `python3 scripts/test-boot-matrix.py`. Первый запускает host-тесты, второй — загрузку, ELF64, bFS, редактор, диагностику M0 и Ethernet, третий — загрузку с 512 МиБ, 1 ГиБ и 4 ГиБ RAM.
+
+Подробнее об устройстве системы см. в [описании архитектуры](docs/ARCH.md). Что реально проверено, а что только планируется, — в [STATUS.md](docs/STATUS.md).
 
 ## Инструменты для Linux
 
@@ -164,7 +231,7 @@ cargo +stable build --locked --release -p bpt
 system/bpt update
 system/bpt search hello
 system/bpt install hello
-applications/hello/hello.sh
+applications/hello/hello.bh
 system/bpt install https://github.com/dr-lexus-dr/bos/blob/v0.1.0/docs/INSTALL.md
 system/bpt list --installed
 ```
@@ -195,6 +262,9 @@ system/network dns <hostname>     # resolve a hostname
 system/network http <url>         # HTTP GET with headers and timing
 system/network download <url> [file]
                                   # download a URL with progress
+system/network wget <url> [-O file]
+                                  # wget-style download syntax
+system/network git <args...>     # run Git on the Linux host
 system/network interfaces         # list network interfaces
 system/network port <host> <port> # check if a TCP port is open
 system/network traceroute <host>  # trace route to host
@@ -203,12 +273,29 @@ system/network traceroute <host>  # trace route to host
 The kernel side lives in `drivers/net` (e1000/rtl8139/virtio-net stubs);
 ARP/IPv4/TCP and `SYS_NET_*` syscalls are next (see `docs/ARCH.md`).
 
+`bnet` runs on the Linux host and uses the host network. `wget` is a download
+alias; `git` forwards arguments to the host's Git installation. For example:
+
+```sh
+system/network wget https://example.com/archive.tar.gz -O archive.tar.gz
+system/network git clone https://github.com/owner/repository.git
+```
+
 Build: `cargo build -p bnet` (sources in `userspace/bnet/`).
 
 ## Сборка утилит для Linux
 
 ```sh
 cargo +stable build -p bpt -p bnet -p btext
+```
+
+`bnet` запускается в Linux и использует сеть хоста. Команда `wget` скачивает
+файл (`-O` задаёт путь), а `git` передаёт аргументы установленному в Linux
+исполняемому файлу Git:
+
+```sh
+system/network wget https://example.com/archive.tar.gz -O archive.tar.gz
+system/network git clone https://github.com/owner/repository.git
 ```
 
 ## Шрифт консоли

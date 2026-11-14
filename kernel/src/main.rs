@@ -30,14 +30,19 @@ mod init;
 mod bsh;
 mod user;
 mod logger;
+mod boottime;
 
 use arch::x86_64::{gdt, idt, pic, apic, cpu, paging, serial};
 use init::kernel_main;
 
 static KERNEL_INITIALIZED: AtomicBool = AtomicBool::new(false);
+static PANIC_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 #[no_mangle]
 pub extern "sysv64" fn _start_rust(boot_info: &'static BootInfo) -> ! {
+    // Start boot timing before anything that can be slow (PIT/WRAM probing).
+    boottime::init();
+
     // Early initialization - before memory management
     early_init(boot_info);
 
@@ -91,6 +96,11 @@ fn early_init(boot_info: &'static BootInfo) {
     info!("Interrupt controllers initialized");
 
     KERNEL_INITIALIZED.store(true, Ordering::SeqCst);
+    info!(
+        "Early init complete in {} ms (TSC {} ticks/ms)",
+        boottime::elapsed_ms(),
+        boottime::tsc_per_ms()
+    );
 }
 
 fn kernel_init(_boot_info: &'static BootInfo) {
@@ -125,7 +135,17 @@ pub extern "sysv64" fn _start_ap_rust(cpu_id: u32, boot_info: &'static BootInfo)
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
+    // A panic while handling a panic (for example a fault during the crash-log
+    // write) must not recurse forever.
+    if PANIC_ACTIVE.swap(true, Ordering::SeqCst) {
+        arch::x86_64::halt_all();
+        loop {
+            core::hint::spin_loop();
+        }
+    }
+
     error!("KERNEL PANIC: {}", info);
+    let _ = fs::persist_crash_log(&alloc::format!("{}", info));
 
     // Print stack trace if available
     #[cfg(feature = "stack_trace")]
