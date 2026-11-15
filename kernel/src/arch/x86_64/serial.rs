@@ -57,6 +57,11 @@ impl SerialPort {
 
     /// Initialize the serial port
     pub fn init(&mut self) {
+        // Unimplemented ISA ports return all ones on laptops without COM1.
+        // Treating 0xff as LSR_DR fabricates an endless stream of input.
+        if unsafe { Port::<u8>::new(self.base_port + UART_LSR).read() } == 0xff {
+            return;
+        }
         let mut lcr = Port::<u8>::new(self.base_port + UART_LCR);
         let mut dll = Port::<u8>::new(self.base_port + UART_DLL);
         let mut dlm = Port::<u8>::new(self.base_port + UART_DLM);
@@ -86,7 +91,8 @@ impl SerialPort {
         unsafe { mcr.write(0x0B); }
 
         // Enable interrupts
-        unsafe { ier.write(IER_RDI | IER_THRI); }
+        // Both RX and TX are polled; do not generate unhandled UART IRQs.
+        unsafe { ier.write(0); }
 
         self.initialized = true;
     }
@@ -100,7 +106,8 @@ impl SerialPort {
     /// Check if data is ready
     fn is_data_ready(&mut self) -> bool {
         let mut lsr = Port::<u8>::new(self.base_port + UART_LSR);
-        unsafe { lsr.read() & LSR_DR != 0 }
+        let status = unsafe { lsr.read() };
+        self.initialized && status != 0xff && status & LSR_DR != 0
     }
 
     /// Write a byte (blocking)
@@ -108,6 +115,8 @@ impl SerialPort {
         if !self.initialized {
             self.init();
         }
+
+        if !self.initialized { return; }
 
         while !self.is_transmit_empty() {
             core::hint::spin_loop();

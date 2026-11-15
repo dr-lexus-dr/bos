@@ -27,33 +27,38 @@ _start:
     /* Clear direction flag */
     cld
 
-    /* Build early page tables: identity-map low 4GB with 1GB pages
-     * and alias it at KERNEL_BASE (0xFFFF800000000000, PML4[256]).
-     * UEFI runs us with its own tables; Rust needs higher-half access.
-     * NOTE: must cover the whole low 4GB — the bootloader places the
-     * kernel with AllocatePages(AnyPages), which typically lands above
-     * 1GB (e.g. ~2GB under QEMU -m 2G). Mapping only 1GB page-faults
-     * on the first instruction fetch after CR3 reload. */
+    /* Use 2 MiB pages: Skylake mobile CPUs need not support 1 GiB pages.
+     * Cover 64 GiB, including firmware pool allocations above 4 GiB. */
     lea boot_pml4(%rip), %rax
     lea boot_pdpt_low(%rip), %rcx
-    orq $0x3, %rcx
-    mov %rcx, 0(%rax)            /* PML4[0] -> PDPT_low */
+    orq $3, %rcx
+    mov %rcx, 0(%rax)
     lea boot_pdpt_high(%rip), %rcx
-    orq $0x3, %rcx
-    mov %rcx, 2048(%rax)         /* PML4[256] -> PDPT_high (256*8=2048) */
-    /* Fill both PDPTs with 4 x 1GB pages: addr = i*1GB | PRESENT|WRITABLE|HUGE(PS) */
+    orq $3, %rcx
+    mov %rcx, 2048(%rax)
     lea boot_pdpt_low(%rip), %rdx
     lea boot_pdpt_high(%rip), %rsi
+    lea boot_pds(%rip), %rdi
     xor %rcx, %rcx
 1:
     mov %rcx, %rax
-    shlq $30, %rax
-    orq $0x83, %rax
+    shlq $12, %rax
+    add %rdi, %rax
+    orq $3, %rax
     mov %rax, (%rdx,%rcx,8)
     mov %rax, (%rsi,%rcx,8)
     inc %rcx
-    cmp $4, %rcx
+    cmp $64, %rcx
     jne 1b
+    xor %rcx, %rcx
+2:
+    mov %rcx, %rax
+    shlq $21, %rax
+    orq $0x83, %rax
+    mov %rax, (%rdi,%rcx,8)
+    inc %rcx
+    cmp $32768, %rcx
+    jne 2b
     /* Load our tables */
     lea boot_pml4(%rip), %rax
     mov %rax, %cr3
@@ -112,3 +117,7 @@ boot_pdpt_low:
     .skip 4096
 boot_pdpt_high:
     .skip 4096
+
+.align 4096
+boot_pds:
+    .skip 262144

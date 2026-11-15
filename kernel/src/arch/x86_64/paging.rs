@@ -77,7 +77,7 @@ pub fn init(memory_map: &[bloader_shared::MemoryRegion]) {
     info!("Current PML4: 0x{:x}", pml4_addr);
 
     // Drop the coarse early-boot alias before building precise mappings:
-    // entry.asm maps low 4GB at PML4[256] with four 1GB pages, and map_to
+    // entry.asm maps low 64GB at PML4[256] with 2MB pages, and map_to
     // cannot split huge pages (heap/APIC/IOAPIC mappings would fail).
     teardown_early_alias();
 
@@ -108,7 +108,7 @@ fn find_physical_memory_offset(memory_map: &[bloader_shared::MemoryRegion]) -> u
     0
 }
 
-/// Drop the coarse early-boot higher-half alias (PML4[256] -> four 1GB
+/// Drop the coarse early-boot higher-half alias (PML4[256] -> four 2MB
 /// pages covering 0xFFFF800000000000..0xFFFF800100000000).
 ///
 /// Must run while RIP/RSP and all touched data live in identity-mapped low
@@ -118,7 +118,7 @@ fn find_physical_memory_offset(memory_map: &[bloader_shared::MemoryRegion]) -> u
 fn teardown_early_alias() {
     let pml4 = unsafe { &mut *(KERNEL_PML4.load(Ordering::SeqCst) as *mut PageTable) };
     pml4[256].set_unused();
-    // Evict any cached translations of the removed 1GB pages.
+    // Evict any cached translations of the removed 2MB pages.
     x86_64::instructions::tlb::flush_all();
     info!("Early higher-half alias removed");
 }
@@ -150,9 +150,9 @@ fn setup_kernel_mapping() {
 
 /// Set up direct physical mapping (physmap)
 fn setup_direct_mapping(memory_map: &[bloader_shared::MemoryRegion]) {
-    // entry.asm already identity-maps the first 4 GiB using huge pages.
+    // entry.asm already identity-maps the first 64 GiB using huge pages.
     // Only map the part of each region beyond that boundary.
-    const EARLY_MAP_END: u64 = 1 << 32;
+    const EARLY_MAP_END: u64 = 1 << 36;
     for region in memory_map {
         if region.region_type != bloader_shared::MemoryType::Conventional
             && region.region_type != bloader_shared::MemoryType::PersistentMemory

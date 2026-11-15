@@ -4,7 +4,11 @@ pub fn init() { crate::arch::x86_64::pic::unmask(1); }
 pub fn handle_irq() { let mut p = Port::<u8>::new(0x60); let _sc: u8 = unsafe { p.read() }; }
 pub fn try_read() -> Option<u8> {
     let mut st = Port::<u8>::new(0x64);
-    unsafe { if st.read() & 1 == 0 { return None; } }
+    let status = unsafe { st.read() };
+    if status == 0xff || status & 1 == 0 { return None; }
     let mut d = Port::<u8>::new(0x60);
-    Some(unsafe { d.read() })
+    let byte = unsafe { d.read() };
+    // The touchpad shares the controller: its AUX packets are not key codes.
+    if status & 0xe0 != 0 { return None; }
+    Some(byte)
 }

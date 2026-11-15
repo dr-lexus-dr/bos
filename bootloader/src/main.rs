@@ -29,6 +29,8 @@ use bloader_shared::{
 
 const KERNEL_FILE_PATH: &str = "\\EFI\\bOS\\kernel.bin";
 const INITRD_FILE_PATH: &str = "\\EFI\\bOS\\initrd.img";
+// The kernel's first page tables identity-map physical addresses only below 4 GiB.
+const EARLY_IDENTITY_MAX: u64 = 0xffff_ffff;
 const BLOADER_VERSION: &str = env!("CARGO_PKG_VERSION");
 const BLOADER_NAME: &str = "bLOADER";
 
@@ -53,7 +55,7 @@ fn boot(mut system_table: SystemTable<Boot>, image_handle: Handle) -> Status {
         Ok(v) => v,
         Err(e) => {
             error!("Failed to load kernel: {}", e);
-            return Status::LOAD_ERROR;
+            return pause_before_firmware_fallback(&mut system_table, Status::LOAD_ERROR);
         }
     };
 
@@ -65,9 +67,16 @@ fn boot(mut system_table: SystemTable<Boot>, image_handle: Handle) -> Status {
         info!("Initrd at 0x{:x} ({} bytes)", addr, initrd_size.unwrap_or(0));
     }
 
+    info!("Boot stage: acquiring GOP framebuffer");
+    boot_services.stall(3_000_000);
     let framebuffer = if option_env!("BLOADER_NO_GOP").is_some() { None } else { setup_framebuffer(boot_services) };
+    info!("Boot stage: GOP complete: {:?}", framebuffer);
+    info!("Boot stage: reading ACPI and load options");
+    boot_services.stall(3_000_000);
     let rsdp_addr = find_rsdp(&system_table);
     let cmdline = get_command_line(boot_services, image_handle);
+    info!("Boot stage: preparing BootInfo");
+    boot_services.stall(3_000_000);
 
     let mut boot_info = prepare_boot_info(
         &kernel_header,
@@ -79,7 +88,15 @@ fn boot(mut system_table: SystemTable<Boot>, image_handle: Handle) -> Status {
     );
 
     // Copy kernel to its load address.
-    let kernel_entry = place_kernel(boot_services, &kernel_header, &kernel_data);
+    info!("Boot stage: placing kernel and applying relocations");
+    boot_services.stall(3_000_000);
+    let kernel_entry = match place_kernel(boot_services, &kernel_header, &kernel_data) {
+        Ok(entry) => entry,
+        Err(e) => {
+            error!("Failed to place kernel below 4 GiB: {:?}", e);
+            return pause_before_firmware_fallback(&mut system_table, Status::OUT_OF_RESOURCES);
+        }
+    };
     boot_info.kernel_entry = kernel_entry;
     info!("Kernel entry point: 0x{:x}", kernel_entry);
 
@@ -108,7 +125,7 @@ fn boot(mut system_table: SystemTable<Boot>, image_handle: Handle) -> Status {
             }
             Err(e) => {
                 error!("memory_map failed: {:?}", e);
-                return Status::BUFFER_TOO_SMALL;
+                return pause_before_firmware_fallback(&mut system_table, Status::BUFFER_TOO_SMALL);
             }
         }
     }
@@ -122,6 +139,19 @@ fn boot(mut system_table: SystemTable<Boot>, image_handle: Handle) -> Status {
         let boot_info_static: &'static BootInfo = &*(&boot_info as *const BootInfo);
         entry_fn(boot_info_static);
     }
+}
+
+/// Keep firmware diagnostics visible. Returning an EFI error immediately lets
+/// the Dell boot manager silently continue to Ubuntu, hiding the actual cause.
+fn pause_before_firmware_fallback(system_table: &mut SystemTable<Boot>, status: Status) -> Status {
+    error!("bLOADER stopped with EFI status {:?}; press any key to continue", status);
+    loop {
+        if matches!(system_table.stdin().read_key(), Ok(Some(_))) {
+            break;
+        }
+        system_table.boot_services().stall(20_000);
+    }
+    status
 }
 
 fn open_fs(
@@ -251,20 +281,14 @@ fn place_kernel(
     boot_services: &BootServices,
     kernel_header: &KernelHeader,
     kernel_data: &[u8],
-) -> u64 {
+) -> Result<u64, BootError> {
     if is_elf(kernel_data) {
         return place_kernel_elf(boot_services, kernel_data);
     }
     let pages = ((kernel_header.size + 4095) / 4096) as usize;
-    let target = if kernel_header.flags.contains(KernelFlags::RELOCATABLE) {
-        boot_services
-            .allocate_pages(
-                AllocateType::AnyPages,
-                UefiMemoryType::LOADER_CODE,
-                pages,
-            )
-            .unwrap_or(kernel_header.load_addr)
-    } else {
+    let target = if !kernel_header.flags.contains(KernelFlags::RELOCATABLE)
+        && kernel_header.load_addr.checked_add(kernel_header.size).is_some_and(|end| end <= 0x1_0000_0000)
+    {
         match boot_services.allocate_pages(
             AllocateType::Address(kernel_header.load_addr),
             UefiMemoryType::LOADER_CODE,
@@ -272,16 +296,24 @@ fn place_kernel(
         ) {
             Ok(addr) => addr,
             Err(_) => {
-                warn!("preferred load addr busy, using AnyPages");
+                warn!("preferred load addr busy, trying free memory below 4 GiB");
                 boot_services
                     .allocate_pages(
-                        AllocateType::AnyPages,
+                        AllocateType::MaxAddress(EARLY_IDENTITY_MAX),
                         UefiMemoryType::LOADER_CODE,
                         pages,
                     )
-                    .expect("out of memory for kernel")
+                    .map_err(|_| BootError::InsufficientMemory)?
             }
         }
+    } else {
+        boot_services
+            .allocate_pages(
+                AllocateType::MaxAddress(EARLY_IDENTITY_MAX),
+                UefiMemoryType::LOADER_CODE,
+                pages,
+            )
+            .map_err(|_| BootError::InsufficientMemory)?
     };
 
     unsafe {
@@ -291,11 +323,11 @@ fn place_kernel(
             kernel_data.len().min(kernel_header.size as usize),
         );
     }
-    target + kernel_header.entry_offset
+    Ok(target + kernel_header.entry_offset)
 }
 
 /// Load ELF64 PT_LOAD segments into contiguous pages. Returns entry point.
-fn place_kernel_elf(boot_services: &BootServices, data: &[u8]) -> u64 {
+fn place_kernel_elf(boot_services: &BootServices, data: &[u8]) -> Result<u64, BootError> {
     let entry = read_u64le(data, 0x18);
     let phoff = read_u64le(data, 0x20) as usize;
     let phentsize = read_u16le(data, 0x36) as usize;
@@ -315,21 +347,12 @@ fn place_kernel_elf(boot_services: &BootServices, data: &[u8]) -> u64 {
     let pages = (total / 4096) as usize;
     // Keep the kernel below 4GB: early page tables only map low 4GB.
     let base = match boot_services.allocate_pages(
-        AllocateType::MaxAddress(0x1_0000_0000),
+        AllocateType::MaxAddress(EARLY_IDENTITY_MAX),
         UefiMemoryType::LOADER_CODE,
         pages,
     ) {
         Ok(addr) => addr,
-        Err(_) => {
-            warn!("no room below 4GB, trying AnyPages (may not boot)");
-            boot_services
-                .allocate_pages(
-                    AllocateType::AnyPages,
-                    UefiMemoryType::LOADER_CODE,
-                    pages,
-                )
-                .expect("out of memory for kernel")
-        }
+        Err(_) => return Err(BootError::InsufficientMemory),
     };
 
     unsafe {
@@ -373,7 +396,7 @@ fn place_kernel_elf(boot_services: &BootServices, data: &[u8]) -> u64 {
         total,
         base + entry
     );
-    base + entry
+    Ok(base + entry)
 }
 
 const PT_DYNAMIC: u32 = 2;
@@ -513,14 +536,15 @@ fn load_initrd(
     // Same <4GB constraint as the kernel: the kernel touches initrd via
     // identity-mapped physical addresses.
     let addr = match boot_services.allocate_pages(
-        AllocateType::MaxAddress(0x1_0000_0000),
+        AllocateType::MaxAddress(EARLY_IDENTITY_MAX),
         UefiMemoryType::LOADER_DATA,
         pages,
     ) {
         Ok(addr) => addr,
-        Err(_) => boot_services
-            .allocate_pages(AllocateType::AnyPages, UefiMemoryType::LOADER_DATA, pages)
-            .map_err(|_| BootError::InsufficientMemory)?,
+        Err(_) => {
+            warn!("initrd does not fit below 4 GiB; booting without it");
+            return Ok((None, None));
+        }
     };
 
     unsafe {
@@ -535,9 +559,19 @@ fn setup_framebuffer(boot_services: &BootServices) -> Option<FramebufferInfo> {
     let gop_handle = boot_services
         .get_handle_for_protocol::<GraphicsOutput>()
         .ok()?;
-    let mut gop = boot_services
-        .open_protocol_exclusive::<GraphicsOutput>(gop_handle)
-        .ok()?;
+    // Do not claim GOP exclusively: firmware console drivers may already own
+    // it. Exclusive access can disconnect the console used by our logger.
+    // We only snapshot the current mode; no SetMode or firmware drawing calls.
+    let mut gop = unsafe {
+        boot_services.open_protocol::<GraphicsOutput>(
+            uefi::table::boot::OpenProtocolParams {
+                handle: gop_handle,
+                agent: boot_services.image_handle(),
+                controller: None,
+            },
+            uefi::table::boot::OpenProtocolAttributes::GetProtocol,
+        )
+    }.ok()?;
 
     let mode = gop.current_mode_info();
     let (w, h) = mode.resolution();
@@ -574,8 +608,10 @@ fn get_command_line(boot_services: &BootServices, image_handle: Handle) -> Strin
     if let Ok(img) = boot_services.open_protocol_exclusive::<LoadedImage>(image_handle) {
         if let Some(bytes) = img.load_options_as_bytes() {
             let s: String = bytes
-                .chunks(2)
-                .map(|c| c[0] as char)
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .take_while(|c| *c != 0)
+                .map(|c| char::from_u32(c as u32).unwrap_or(char::REPLACEMENT_CHARACTER))
                 .filter(|c| *c != '\0')
                 .collect();
             if !s.is_empty() {

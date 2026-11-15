@@ -92,7 +92,7 @@ pub fn init() {
 
     // Map APIC if not identity mapped
     if apic_addr >= 0xFEE0_0000 {
-        // Map into the higher half (KERNEL_BASE alias covers low 4GB from
+        // Map into the higher half (KERNEL_BASE alias covers low 512GB from
         // early boot; paging::init keeps it). NOTE: plain
         // `0xFFFF_FF00_0000 + apic` overflows into bit 48 and is
         // non-canonical — do not use a 0xFFFF_FFxx base here.

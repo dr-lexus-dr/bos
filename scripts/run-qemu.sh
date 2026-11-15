@@ -31,7 +31,7 @@ if [[ -n "$DATA_DISK" ]]; then
   esac
 fi
 exec qemu-system-x86_64 \
-  -machine q35 -cpu max -smp 4 -m "$MEMORY" \
+  -machine q35 -cpu "${BOS_CPU:-max}" -smp 4 -m "$MEMORY" \
   -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
   -drive file=fat:rw:"$ESP",format=raw,if=none,id=esp \
   -device ide-hd,drive=esp,bootindex=0 \

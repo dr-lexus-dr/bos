@@ -36,3 +36,6 @@ __pycache__/
 
 # Locally compiled bitstat utility
 /bitstat
+
+# Local conversation attachments
+/.codex-attachments/
