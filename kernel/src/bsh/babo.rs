@@ -669,5 +669,5 @@ fn save_file(path: &str, data: &[u8]) -> Result<bool, FileSystemError> {
                 || path.starts_with(&format!("{}/", mount.mount_point.trim_end_matches('/')))
         })
         .max_by_key(|mount| mount.mount_point.len());
-    Ok(mount.is_some_and(|mount| mount.device == "virtio0"))
+    Ok(mount.is_some_and(|mount| mount.device == crate::drivers::data_disk::name()))
 }

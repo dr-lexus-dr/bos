@@ -10,7 +10,7 @@
 # Usage:
 #   bash scripts/build.sh [--release] [--esp DIR]
 #                         [--skip-bootloader] [--skip-kernel] [--skip-initrd]
-#                         [--host-only] [-h|--help]
+#                         [--host-only] [--recovery] [-h|--help]
 #
 # Examples:
 #   bash scripts/build.sh                      # debug build, ESP -> target/esp
@@ -30,6 +30,7 @@ SKIP_BOOTLOADER=0
 SKIP_KERNEL=0
 SKIP_INITRD=0
 HOST_ONLY=0
+RECOVERY=0
 
 UEFI_TARGET="x86_64-unknown-uefi"
 KERNEL_TARGET="x86_64-unknown-none"
@@ -51,6 +52,7 @@ while [[ $# -gt 0 ]]; do
         --skip-kernel)      SKIP_KERNEL=1; shift ;;
         --skip-initrd)      SKIP_INITRD=1; shift ;;
         --host-only)        HOST_ONLY=1; shift ;;
+        --recovery)         RECOVERY=1; shift ;;
         -h|--help)          usage; exit 0 ;;
         *)                  die "unknown option '$1' (try --help)" ;;
     esac
@@ -143,14 +145,25 @@ if [[ "$SKIP_BOOTLOADER" -eq 0 || "$SKIP_KERNEL" -eq 0 || "$SKIP_INITRD" -eq 0 ]
         need tar
         need as
         need ld
+        # Native Rust program, linked for bOS rather than the Linux host.
+        cargo build --locked $CARGO_PROFILE_FLAG -p bos-native-demo --target "$KERNEL_TARGET"
         mkdir -p target/user
+        cp "target/$KERNEL_TARGET/$PROFILE/bos-native-demo" target/user/native-demo.bh
+        for program in process-test pipe-reader pipe-writer child-exit native-init native-shell native-cat native-wc; do
+            cp "target/$KERNEL_TARGET/$PROFILE/$program" "target/user/$program.bh"
+        done
         as --64 userspace/hello/start.S -o target/user/hello.o
         ld -m elf_x86_64 -T userspace/hello/link.ld target/user/hello.o -o target/user/hello.bh
         tar --format=ustar --mtime=@0 --owner=0 --group=0 \
             -cf "$ESP/EFI/bOS/initrd.img" \
             applications/calculator.bh applications/notepad.bh \
             system/init.sh system/bpt system/bpm system/network system/text-editor \
-            users/default/.profile -C target/user --transform='s,^hello\.bh$,applications/hello.bh,' hello.bh
+            users/default/.profile -C target/user --transform='s,^\([^/]*\.bh\)$,applications/\1,' hello.bh native-demo.bh process-test.bh pipe-reader.bh pipe-writer.bh child-exit.bh native-init.bh native-shell.bh native-cat.bh native-wc.bh
+        if [[ "$RECOVERY" -eq 1 ]]; then
+            printf 'Explicit recovery boot\n' > target/user/recovery
+            tar -rf "$ESP/EFI/bOS/initrd.img" --format=ustar --mtime=@0 --owner=0 --group=0 \
+                -C target/user --transform='s,^recovery$,system/recovery,' recovery
+        fi
     fi
 
     log "ESP contents:"

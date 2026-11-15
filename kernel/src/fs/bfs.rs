@@ -868,7 +868,7 @@ impl BfsFileSystem {
     }
 
     pub fn load_users_disk(sectors: u64) -> Result<Self, FileSystemError> {
-        use crate::drivers::virtio_block;
+        use crate::drivers::data_disk as virtio_block;
         let bytes = sectors.checked_mul(512).ok_or(FileSystemError::InvalidFormat)?;
         if !(4 * 1024 * 1024..=32 * 1024 * 1024).contains(&bytes) || bytes % BLOCK_SIZE_U64 != 0 {
             return Err(FileSystemError::InvalidFormat);
@@ -880,7 +880,7 @@ impl BfsFileSystem {
         }
         let mut image = vec![0; bytes as usize];
         virtio_block::read(0, &mut image).map_err(|_| FileSystemError::IoError)?;
-        let fs = Self::load_image("virtio0", image)?;
+        let fs = Self::load_image(crate::drivers::data_disk::name(), image)?;
         {
             let mut g = fs.inner.write();
             g.validate_users_image()?;
@@ -1345,7 +1345,7 @@ impl FileSystem for BfsFileSystem {
     }
 
     fn sync(&self) -> Result<(), FileSystemError> {
-        use crate::drivers::virtio_block;
+        use crate::drivers::data_disk as virtio_block;
         let mut g = self.inner.write();
         if !g.dirty.iter().any(|dirty| *dirty) {
             return Ok(());

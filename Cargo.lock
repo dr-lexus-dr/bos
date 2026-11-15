@@ -130,6 +130,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "bos-ipc-tests"
+version = "0.1.0"
+dependencies = [
+ "spin",
+]
+
+[[package]]
+name = "bos-memory-tests"
+version = "0.1.0"
+dependencies = [
+ "bloader_shared",
+ "log",
+ "spin",
+ "x86_64",
+]
+
+[[package]]
+name = "bos-native-demo"
+version = "0.1.0"
+dependencies = [
+ "libbos",
+]
+
+[[package]]
 name = "bos_kernel"
 version = "0.6.0"
 dependencies = [
@@ -780,6 +804,10 @@ checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
 dependencies = [
  "spin",
 ]
+
+[[package]]
+name = "libbos"
+version = "0.1.0"
 
 [[package]]
 name = "libc"

@@ -1,0 +1,11 @@
+[package]
+name = "bos-memory-tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+spin = "0.9"
+x86_64 = "0.15"
+log = "0.4"
+bloader_shared = { path = "../../bloader_shared" }

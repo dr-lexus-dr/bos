@@ -2,6 +2,14 @@
 
 **bSH · bFS · bPT**
 
+> Рабочая копия после v0.6.0 загружается в нативные PID 1 и bSH (ring 3).
+> Работают spawn/wait, блокирующие pipes, `cat FILE | wc -c`, fsync и
+> постоянный bFS-диск через VirtIO или AHCI в QEMU. Для прежней полной
+> kernel-консоли соберите с `bash scripts/build.sh --release --recovery`.
+> [Точный статус](docs/STATUS.md), [план](docs/ROADMAP.md), [ABI](docs/abi.md).
+> Это промежуточная сборка, не готовый релиз bOS 1.0.
+
+
 *Boot to a shell. Work with files. Manage GitHub packages with bPT.*
 
 *Загрузитесь в оболочку. Работайте с файлами. Управляйте пакетами GitHub через bPT.*

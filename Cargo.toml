@@ -1,6 +1,10 @@
 [workspace]
 resolver = "2"
 members = [
+    "tests/kernel-ipc",
+    "userspace/libbos",
+    "userspace/native-demo",
+    "tests/kernel-memory",
     "bloader_shared",
     "bootloader",
     "kernel",

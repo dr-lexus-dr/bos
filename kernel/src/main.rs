@@ -66,6 +66,7 @@ fn early_init(boot_info: &'static BootInfo) {
     logger::init(LevelFilter::Trace);
 
     info!("=== bOS Kernel Starting ===");
+    info!("Source revision: {}", env!("BOS_SOURCE_REVISION"));
     info!("Bootloader: {} v{}", boot_info.bootloader_name_str(), boot_info.bootloader_version_str());
     info!("Kernel UUID: {}", boot_info.kernel_uuid);
     info!("Command line: {}", boot_info.cmdline_str());

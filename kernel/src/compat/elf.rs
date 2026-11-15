@@ -72,7 +72,11 @@ impl<'a> Executable<'a> {
         let address = u64_at(header, 16);
         let file_size = u64_at(header, 32);
         let size = u64_at(header, 40);
-        if file_size > size
+        let alignment = u64_at(header, 48);
+        if address.checked_add(size).is_none()
+            || (alignment > 1 && (!alignment.is_power_of_two()
+                || address % alignment != offset as u64 % alignment))
+            || file_size > size
             || flags & 4 == 0
             || flags & 3 == 3
             || offset as u64 % 4096 != address % 4096

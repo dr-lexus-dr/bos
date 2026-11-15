@@ -36,7 +36,9 @@ pub fn run(boot_info: &'static bloader_shared::BootInfo) -> ! {
     let storage = fs::init(boot_info);
     crate::drivers::net::init();
     cmd_cd(None);
-    print_str("\x1b[97mbOS kernel console (bSH) v");
+    let recovery=fs::VFS.lock().stat("/system/recovery").is_ok()
+        || boot_info.cmdline_str().split_whitespace().any(|arg|arg=="recovery");
+    print_str(if recovery { "\x1b[97mbOS kernel console (bSH) v" } else { "\x1b[97mbOS native session v" });
     print_str(KERNEL_VERSION);
     print_str("\x1b[0m");
     print_str(" — type 'help'\r\n");
@@ -48,6 +50,14 @@ pub fn run(boot_info: &'static bloader_shared::BootInfo) -> ! {
     if fs::read_crash_log().is_some() {
         let _color = ColorGuard::new(Color::Yellow);
         print_line("warning: the previous boot ended in a kernel panic; run 'crashlog' to read it");
+    }
+    if !recovery {
+        let init=fs::VFS.lock().read_file("/applications/native-init.bh");
+        match init {
+            Ok(image)=>{ let _=crate::user::run_init(&image); },
+            Err(_)=>print_error("init image unavailable"),
+        }
+        print_error("PID 1 terminated; entering recovery console");
     }
     let mut history = line::History::new();
     loop {
@@ -82,6 +92,32 @@ fn exec(line: &str, kernel_uuid: uuid::Uuid) {
     };
     let args: Vec<&str> = toks[1..].iter().map(|s| s.as_str()).collect();
 
+    if cmd == "runall" {
+        if redirections.input.is_some() || redirections.output.is_some() {
+            return print_error("runall: redirection unavailable");
+        }
+        if args.is_empty() || args.len() > 16 { return print_error("usage: runall <program.bh> ... (max 16)"); }
+        let mut images = Vec::new();
+        for path in &args {
+            let mut vfs = fs::VFS.lock();
+            match vfs.stat(path) {
+                Ok(st) if !st.is_dir() && st.size <= 4 * 1024 * 1024 => {},
+                _ => return print_error("runall: invalid executable size or path"),
+            }
+            match vfs.read_file(path) {
+                Ok(image) => images.push(image),
+                Err(_) => return print_error("runall: could not read executable"),
+            }
+        }
+        let slices: Vec<&[u8]> = images.iter().map(Vec::as_slice).collect();
+        match crate::user::run_many(&slices) {
+            Ok(statuses) => for (path, status) in args.iter().zip(statuses) {
+                print_line(&alloc::format!("{}: status {}", path, status));
+            },
+            Err(error) => print_error(error),
+        }
+        return;
+    }
     if cmd == "run" || cmd.starts_with('/') || cmd.starts_with("./") || cmd.starts_with("../") {
         if redirections.input.is_some() || redirections.output.is_some() {
             print_error("run: redirection is unavailable for user programs");
@@ -408,17 +444,24 @@ fn run_capture(
         "truncate" => cmd_truncate(args, out),
         "chmod" => cmd_chmod(args, out),
         "find" => cmd_find(args, out),
+        "memtest" => {
+            match crate::mm::selftest::run() {
+                Ok(()) => { emit(out, "memory self-test passed"); 0 }
+                Err(error) => { emit(out, error); 1 }
+            }
+        }
         "mem" => {
             let (htotal, hused) = heap_usage();
             emit(
                 out,
                 &alloc::format!(
-                    "phys {} MB total / {} MB free / {} MB used; heap {} KiB total / {} KiB used",
+                    "phys {} MB total / {} MB free / {} MB used; heap {} KiB total / {} KiB used; frames-free: {}",
                     phys::total_memory() / 1024 / 1024,
                     phys::free_memory() / 1024 / 1024,
                     phys::used_memory() / 1024 / 1024,
                     htotal / 1024,
                     hused / 1024,
+                    phys::free_memory() / 4096,
                 ),
             );
             0
@@ -606,6 +649,8 @@ const COMMANDS: &[(&str, &str)] = &[
     ("chmod", "chmod <oct> <path...> — change permission bits"),
     ("find", "find [path] [-name pat] [-type f|d|l] — walk tree"),
     ("mem", "mem — memory stats"),
+    ("runall", "runall <program.bh> ... — preemptive foreground batch"),
+    ("memtest", "memtest — check physical and heap allocators"),
     ("uptime", "uptime — timer ticks and boot time"),
     ("clear", "clear — clear screen"),
     ("reboot", "reboot — reset via 8042"),
@@ -2036,3 +2081,5 @@ fn halt() -> ! {
         }
     }
 }
+
+pub(crate) fn native_keyboard_byte()->Option<u8> { line::native_keyboard_byte() }

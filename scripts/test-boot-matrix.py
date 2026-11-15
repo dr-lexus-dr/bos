@@ -48,11 +48,17 @@ def main():
         with boot(esp, memory=memory, label=f"matrix-{memory}") as (shell, output):
             assert b"No data disk; /users is in RAM" in output
             shell.command("mem", b"phys ")
+            shell.command("memtest", b"memory self-test passed")
+            shell.command("/applications/native-demo.bh", b"libbos native test passed")
             bootstat = shell.command("bootstat", b"boot:")
             assert b"tsc:" in bootstat and b"dmesg:" in bootstat, bootstat
             shell.command("dmesg", b"=== bOS Kernel Starting ===")
             shell.command("halt", prompt=b"halted.\r\n")
-        print(f"{memory}: boot and M0 diagnostics passed", flush=True)
+        with boot(esp, memory=memory, label=f"native-matrix-{memory}",
+                  recovery=False, prompt=b"bSH> ") as (shell, output):
+            assert b"init: PID 1 in ring 3" in output
+            shell.command("/applications/process-test.bh", b"PROCESS PIPE TEST PASSED", prompt=b"bSH> ")
+        print(f"{memory}: recovery diagnostics and native processes passed", flush=True)
 
 
 if __name__ == "__main__":

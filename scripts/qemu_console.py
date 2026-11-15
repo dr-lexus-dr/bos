@@ -6,6 +6,8 @@ Every boot writes the raw serial stream to `target/qemu-logs` (override with
 instead of an unreadable traceback.
 """
 import os
+import shutil
+import tempfile
 import select
 import subprocess
 import time
@@ -66,7 +68,7 @@ class Console:
 
 
 @contextmanager
-def boot(esp, disk=None, *, nic="e1000", memory=None, label=None, log=True):
+def _boot(esp, disk=None, *, nic="e1000", memory=None, label=None, log=True, prompt=PROMPT):
     global _boot_counter
     _boot_counter += 1
     name = label or f"boot-{_boot_counter:02d}"
@@ -85,7 +87,7 @@ def boot(esp, disk=None, *, nic="e1000", memory=None, label=None, log=True):
     ) as process:
         console = Console(process)
         try:
-            output = console.expect(PROMPT)
+            output = console.expect(prompt)
             print(f"{name}: bSH ready after {time.monotonic() - start:.1f}s", flush=True)
             yield console, output
         finally:
@@ -99,3 +101,20 @@ def boot(esp, disk=None, *, nic="e1000", memory=None, label=None, log=True):
             if log:
                 LOG_DIR.mkdir(parents=True, exist_ok=True)
                 (LOG_DIR / f"{name}.log").write_bytes(console.raw)
+
+
+@contextmanager
+def boot(esp, disk=None, *, nic="e1000", memory=None, label=None, log=True,
+         recovery=True, prompt=PROMPT):
+    """Old regression suites explicitly boot the recovery shell in a private ESP."""
+    with tempfile.TemporaryDirectory(prefix="bos-boot-") as directory:
+        stage=Path(directory)
+        target=stage/"esp"
+        shutil.copytree(Path(esp)/"EFI",target/"EFI")
+        if recovery:
+            (stage/"system").mkdir()
+            (stage/"system/recovery").write_text("QEMU recovery regression suite\n")
+            subprocess.run(["tar","-rf",str(target/"EFI/bOS/initrd.img"),
+                            "-C",str(stage),"system/recovery"],check=True)
+        with _boot(target,disk,nic=nic,memory=memory,label=label,log=log,prompt=prompt) as result:
+            yield result

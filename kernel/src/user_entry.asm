@@ -16,7 +16,7 @@ enter_user:
 
     push ${user_ds}
     push %rsi
-    push $2
+    push $0x202
     push ${user_cs}
     push %rdi
     xor %eax, %eax
@@ -49,12 +49,13 @@ leave_user:
     pop %rbx
     ret
 
-.global user_syscall
+ .global user_syscall
 user_syscall:
     cld
+    push %rax
+    push %rbx
     push %rcx
     push %rdx
-    push %rbx
     push %rbp
     push %rsi
     push %rdi
@@ -66,13 +67,37 @@ user_syscall:
     push %r13
     push %r14
     push %r15
-    sub $8, %rsp
-    mov %rdx, %rcx
-    mov %rsi, %rdx
-    mov %rdi, %rsi
+    mov %rsp, %rdi
+    and $-16, %rsp
+    call switch_user_syscall
     mov %rax, %rdi
-    call dispatch_user_syscall
-    add $8, %rsp
+    jmp resume_user
+
+.global user_timer
+user_timer:
+    cld
+    push %rax
+    push %rbx
+    push %rcx
+    push %rdx
+    push %rbp
+    push %rsi
+    push %rdi
+    push %r8
+    push %r9
+    push %r10
+    push %r11
+    push %r12
+    push %r13
+    push %r14
+    push %r15
+    mov %rsp, %rdi
+    and $-16, %rsp
+    call switch_user_timer
+    mov %rax, %rdi
+.global resume_user
+resume_user:
+    mov %rdi, %rsp
     pop %r15
     pop %r14
     pop %r13
@@ -84,7 +109,8 @@ user_syscall:
     pop %rdi
     pop %rsi
     pop %rbp
-    pop %rbx
     pop %rdx
     pop %rcx
+    pop %rbx
+    pop %rax
     iretq

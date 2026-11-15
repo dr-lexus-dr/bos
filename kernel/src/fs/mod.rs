@@ -675,17 +675,21 @@ impl Vfs {
     // ---- convenience whole-file I/O (for shells / cp / cat) ----
     pub fn read_file(&mut self, path: &str) -> Result<Vec<u8>, FileSystemError> {
         let fd = self.open(path, O_RDONLY)?;
-        let mut out = Vec::new();
-        let mut chunk = [0u8; 1024];
-        loop {
-            let n = self.read(fd, &mut chunk)?;
-            if n == 0 {
-                break;
+        let result = (|| {
+            let mut out = Vec::new();
+            let mut chunk = [0u8; 1024];
+            loop {
+                let n = self.read(fd, &mut chunk)?;
+                if n == 0 { break; }
+                out.try_reserve(n).map_err(|_| FileSystemError::NoSpace)?;
+                out.extend_from_slice(&chunk[..n]);
             }
-            out.extend_from_slice(&chunk[..n]);
-        }
-        self.close(fd)?;
-        Ok(out)
+            Ok(out)
+        })();
+        let closed = self.close(fd);
+        let bytes = result?;
+        closed?;
+        Ok(bytes)
     }
 
     pub fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), FileSystemError> {
@@ -801,12 +805,12 @@ pub fn init(boot_info: &bloader_shared::BootInfo) -> &'static str {
         }
     }
 
-    let storage = match crate::drivers::virtio_block::probe() {
+    let storage = match crate::drivers::data_disk::probe() {
         Ok(Some(sectors)) => {
             match bfs::BfsFileSystem::load_users_disk(sectors)
-                .and_then(|disk| VFS.lock().mount_fs("/users", "virtio0", Box::new(disk), false))
+                .and_then(|disk| VFS.lock().mount_fs("/users", crate::drivers::data_disk::name(), Box::new(disk), false))
             {
-                Ok(()) => "/users is persistent on virtio0",
+                Ok(()) => match crate::drivers::data_disk::name() { "nvme0" => "/users is persistent on nvme0", "ahci0" => "/users is persistent on ahci0", _ => "/users is persistent on virtio0" },
                 Err(error) => {
                     log::warn!("bFS data disk rejected: {:?}", error);
                     "Data disk rejected; /users is in RAM"
@@ -815,7 +819,7 @@ pub fn init(boot_info: &bloader_shared::BootInfo) -> &'static str {
         }
         Ok(None) => "No data disk; /users is in RAM",
         Err(error) => {
-            log::warn!("VirtIO data disk unavailable: {}", error);
+            log::warn!("Data disk unavailable: {}", error);
             "Data disk unavailable; /users is in RAM"
         }
     };

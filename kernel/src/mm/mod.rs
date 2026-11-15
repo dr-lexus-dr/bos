@@ -3,6 +3,7 @@
 pub mod phys;
 pub mod heap;
 pub mod paging;
+pub mod selftest;
 
 use crate::mm::phys::init as phys_init;
 use crate::mm::heap::init as heap_init;

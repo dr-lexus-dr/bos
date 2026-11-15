@@ -1,14 +1,19 @@
 //! Kernel Heap Allocator
 
 use core::alloc::{GlobalAlloc, Layout};
+use core::ptr;
 use core::sync::atomic::{AtomicUsize, Ordering};
-use core::ptr::{self, NonNull};
+#[path = "free_list.rs"]
+mod free_list;
+use crate::arch::x86_64::paging::{
+    map_to, unmap, PageTableFlags, KERNEL_HEAP_BASE, KERNEL_HEAP_SIZE,
+};
+use crate::mm::phys::{allocate_frames, deallocate_frames, FrameRange, FRAME_SIZE};
 use alloc::alloc::{alloc, dealloc, handle_alloc_error};
-use spin::Mutex;
+use free_list::{align_up, FreeList};
 use lazy_static::lazy_static;
 use log::{info, trace, warn};
-use crate::mm::phys::{allocate_frames, deallocate_frames, FrameRange, FRAME_SIZE};
-use crate::arch::x86_64::paging::{map_to, unmap, KERNEL_HEAP_BASE, KERNEL_HEAP_SIZE, PageTableFlags};
+use spin::Mutex;
 
 /// Heap allocator state
 static HEAP_START: AtomicUsize = AtomicUsize::new(0);
@@ -31,7 +36,9 @@ pub struct LockedHeap {
 
 impl LockedHeap {
     pub const fn new() -> Self {
-        Self { inner: Mutex::new(Heap::new()) }
+        Self {
+            inner: Mutex::new(Heap::new()),
+        }
     }
 
     pub fn lock(&self) -> spin::MutexGuard<'_, Heap> {
@@ -88,8 +95,12 @@ impl Heap {
         self.start = heap_start;
         self.end = heap_start + heap_size;
         self.next = heap_start;
-        info!("Heap initialized: 0x{:x} - 0x{:x} ({} MB)",
-              heap_start, self.end, heap_size / 1024 / 1024);
+        info!(
+            "Heap initialized: 0x{:x} - 0x{:x} ({} MB)",
+            heap_start,
+            self.end,
+            heap_size / 1024 / 1024
+        );
 
         HEAP_START.store(heap_start, Ordering::SeqCst);
         HEAP_END.store(self.end, Ordering::SeqCst);
@@ -97,7 +108,9 @@ impl Heap {
 
     /// Allocate memory
     pub fn allocate(&mut self, layout: Layout) -> *mut u8 {
-        let size = layout.size().max(MIN_ALLOC_SIZE);
+        let Some(size) = align_up(layout.size().max(MIN_ALLOC_SIZE), ALLOC_ALIGNMENT) else {
+            return ptr::null_mut();
+        };
         let align = layout.align().max(ALLOC_ALIGNMENT);
 
         // Try free list first
@@ -107,54 +120,66 @@ impl Heap {
             return ptr;
         }
 
-        // Bump allocation
-        let aligned_next = align_up(self.next, align);
-        let end_addr = aligned_next + size;
-
-        if end_addr > self.end {
-            // Try to expand heap
-            if let Err(_) = self.expand_heap(size) {
-                handle_alloc_error(layout);
-            }
-            return self.allocate(layout); // Retry after expansion
+        let Some(aligned_next) = align_up(self.next, align) else {
+            return ptr::null_mut();
+        };
+        let Some(end_addr) = aligned_next.checked_add(size) else {
+            return ptr::null_mut();
+        };
+        if end_addr > self.end && self.expand_heap(end_addr - self.end).is_err() {
+            return ptr::null_mut();
         }
-
+        // Return alignment padding to the allocator instead of losing it.
+        if aligned_next > self.next {
+            unsafe {
+                assert!(self
+                    .free_list
+                    .deallocate(self.next, aligned_next - self.next));
+            }
+        }
         self.next = end_addr;
         self.allocated_bytes += size;
         self.allocation_count += 1;
-
         aligned_next as *mut u8
     }
 
-    /// Deallocate memory
-    pub fn deallocate(&mut self, ptr: *mut u8, layout: Layout) {
-        let size = layout.size().max(MIN_ALLOC_SIZE);
-        self.free_list.deallocate(ptr as usize, size);
-        self.freed_bytes += size;
+    pub fn deallocate(&mut self, pointer: *mut u8, layout: Layout) {
+        let Some(size) = align_up(layout.size().max(MIN_ALLOC_SIZE), ALLOC_ALIGNMENT) else {
+            return;
+        };
+        let address = pointer as usize;
+        if address < self.start || address.checked_add(size).is_none_or(|end| end > self.next) {
+            return;
+        }
+        if unsafe { self.free_list.deallocate(address, size) } {
+            self.freed_bytes += size;
+        }
     }
 
-    /// Expand heap by mapping more pages
+    /// Map incrementally. On failure retain successfully mapped capacity so a retry
+    /// never remaps or leaks those frames; free the frame for the failed mapping.
     fn expand_heap(&mut self, needed: usize) -> Result<(), &'static str> {
-        let current_end = self.end;
-        let new_end = align_up(current_end + needed, FRAME_SIZE as usize);
-        let additional_frames = (new_end - current_end) / FRAME_SIZE as usize;
-
-        for i in 0..additional_frames {
-            let frame_addr = current_end + i * FRAME_SIZE as usize;
-            let virt_addr = frame_addr as u64;
+        let new_end = self
+            .end
+            .checked_add(needed)
+            .and_then(|end| align_up(end, FRAME_SIZE as usize))
+            .filter(|end| *end as u64 <= KERNEL_HEAP_BASE + KERNEL_HEAP_SIZE)
+            .ok_or("Heap limit reached")?;
+        while self.end < new_end {
             let frame = allocate_frames(1).ok_or("Out of physical memory")?;
-
-            map_to(
-                x86_64::VirtAddr::new(virt_addr),
+            if map_to(
+                x86_64::VirtAddr::new(self.end as u64),
                 frame.start_frame().start_address(),
                 PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE,
-            ).map_err(|_| "Failed to map heap page")?;
+            )
+            .is_err()
+            {
+                deallocate_frames(frame);
+                return Err("Failed to map heap page");
+            }
+            self.end += FRAME_SIZE as usize;
+            HEAP_END.store(self.end, Ordering::SeqCst);
         }
-
-        self.end = new_end;
-        HEAP_END.store(new_end, Ordering::SeqCst);
-        trace!("Heap expanded to 0x{:x}", new_end);
-
         Ok(())
     }
 
@@ -169,90 +194,6 @@ impl Heap {
             free_list_blocks: self.free_list.block_count(),
         }
     }
-}
-
-/// Free list for managing deallocated blocks
-struct FreeList {
-    head: Option<NonNull<FreeBlock>>,
-    block_count: usize,
-}
-
-struct FreeBlock {
-    size: usize,
-    next: Option<NonNull<FreeBlock>>,
-}
-
-impl FreeList {
-    const fn new() -> Self {
-        Self { head: None, block_count: 0 }
-    }
-
-    fn allocate(&mut self, size: usize, align: usize) -> Option<*mut u8> {
-        let mut current = self.head;
-        let mut prev: Option<NonNull<FreeBlock>> = None;
-
-        while let Some(block_ptr) = current {
-            let block = unsafe { block_ptr.as_ref() };
-            let block_addr = block_ptr.as_ptr() as usize;
-            let aligned_addr = align_up(block_addr, align);
-
-            if aligned_addr + size <= block_addr + block.size {
-                // Found suitable block
-                let remaining = block_addr + block.size - (aligned_addr + size);
-
-                // Remove block from list
-                if let Some(mut prev_ptr) = prev {
-                    unsafe { prev_ptr.as_mut().next = block.next; }
-                } else {
-                    self.head = block.next;
-                }
-
-                // If there's remaining space, add it back to free list
-                if remaining >= MIN_ALLOC_SIZE {
-                    let new_block_addr = aligned_addr + size;
-                    let mut new_block = NonNull::new(new_block_addr as *mut FreeBlock).unwrap();
-                    unsafe {
-                        new_block.as_mut().size = remaining;
-                        new_block.as_mut().next = self.head;
-                    }
-                    self.head = Some(new_block);
-                    self.block_count += 1;
-                } else if remaining > 0 {
-                    // Too small, just waste it (could coalesce)
-                }
-
-                self.block_count -= 1;
-                return Some(aligned_addr as *mut u8);
-            }
-
-            prev = current;
-            current = block.next;
-        }
-
-        None
-    }
-
-    fn deallocate(&mut self, addr: usize, size: usize) {
-        // Simple: add to front of free list
-        let mut block = NonNull::new(addr as *mut FreeBlock).unwrap();
-        unsafe {
-            block.as_mut().size = size;
-            block.as_mut().next = self.head;
-        }
-        self.head = Some(block);
-        self.block_count += 1;
-
-        // TODO: Coalesce adjacent blocks
-    }
-
-    fn block_count(&self) -> usize {
-        self.block_count
-    }
-}
-
-/// Align address up to alignment
-fn align_up(addr: usize, align: usize) -> usize {
-    (addr + align - 1) & !(align - 1)
 }
 
 /// Heap statistics
@@ -284,11 +225,16 @@ pub fn init() {
             x86_64::VirtAddr::new(virt_addr as u64),
             frame.start_frame().start_address(),
             PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE,
-        ).expect("Failed to map heap page");
+        )
+        .expect("Failed to map heap page");
     }
 
     HEAP_ALLOCATOR.lock().init(heap_start, INITIAL_HEAP_SIZE);
-    info!("Kernel heap initialized: {} MB at 0x{:x}", INITIAL_HEAP_SIZE / 1024 / 1024, heap_start);
+    info!(
+        "Kernel heap initialized: {} MB at 0x{:x}",
+        INITIAL_HEAP_SIZE / 1024 / 1024,
+        heap_start
+    );
 }
 
 /// Get heap statistics
@@ -310,7 +256,9 @@ pub fn deallocate(ptr: *mut u8, layout: Layout) {
 pub fn allocate_zeroed(layout: Layout) -> *mut u8 {
     let ptr = allocate(layout);
     if !ptr.is_null() {
-        unsafe { ptr.write_bytes(0, layout.size()); }
+        unsafe {
+            ptr.write_bytes(0, layout.size());
+        }
     }
     ptr
 }
@@ -320,7 +268,9 @@ pub fn reallocate(ptr: *mut u8, old_layout: Layout, new_layout: Layout) -> *mut 
     let new_ptr = allocate(new_layout);
     if !new_ptr.is_null() && !ptr.is_null() {
         let copy_size = old_layout.size().min(new_layout.size());
-        unsafe { core::ptr::copy_nonoverlapping(ptr, new_ptr, copy_size); }
+        unsafe {
+            core::ptr::copy_nonoverlapping(ptr, new_ptr, copy_size);
+        }
         deallocate(ptr, old_layout);
     }
     new_ptr

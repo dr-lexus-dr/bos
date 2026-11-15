@@ -49,12 +49,10 @@ lazy_static! {
             idt[0x80].set_handler_addr(VirtAddr::new(crate::user::user_syscall as *const () as u64))
                 .set_privilege_level(x86_64::PrivilegeLevel::Ring3);
         }
-        // Alternate syscall entry (SYSCALL/SYSRET)
-        unsafe { idt[0x81].set_handler_fn(syscall_handler); }
 
         // IPI vectors
         unsafe {
-            idt[0xF0].set_handler_fn(ipi_timer_handler);      // Timer IPI
+            idt[0xF0].set_handler_addr(VirtAddr::new(crate::user::user_timer as *const () as u64));      // Timer IPI
             idt[0xF1].set_handler_fn(ipi_reschedule_handler); // Reschedule IPI
             idt[0xF2].set_handler_fn(ipi_halt_handler);       // Halt IPI
             idt[0xF3].set_handler_fn(ipi_generic_handler);    // Generic IPI
@@ -222,9 +220,7 @@ extern "x86-interrupt" fn spurious_irq_handler(_stack_frame: InterruptStackFrame
 
 // Syscall handler
 
-extern "x86-interrupt" fn syscall_handler(stack_frame: InterruptStackFrame) {
-    crate::syscall::handle_interrupt(stack_frame);
-}
+
 
 // IPI handlers
 

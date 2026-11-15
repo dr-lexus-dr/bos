@@ -81,6 +81,19 @@ pub(super) fn key() -> Key {
     INPUT.lock().next_key(true)
 }
 
+/// Nonblocking PS/2 adapter for the native console. The recovery editor keeps
+/// ownership of the same decoder whenever it is active.
+pub(super) fn native_keyboard_byte() -> Option<u8> {
+    let mut input=INPUT.try_lock()?;
+    let key=input.ps2(keyboard::try_read()?)?;
+    match key {
+        Key::Text(ch) if ch.is_ascii()=>Some(ch as u8),
+        Key::Enter=>Some(b'\r'), Key::Backspace=>Some(127), Key::Tab=>Some(b'\t'),
+        Key::Control(ch)=>Some(ch-b'a'+1),
+        _=>None,
+    }
+}
+
 impl Input {
     fn next_key(&mut self, unicode: bool) -> Key {
         loop {

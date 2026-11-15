@@ -241,7 +241,7 @@ pub fn set_timer_one_shot(ticks: u32) {
 /// Set timer to periodic mode
 pub fn set_timer_periodic(ticks: u32) {
     unsafe {
-        write_reg(APIC_TIMER_LVT, LVT_MASK | TIMER_PERIODIC | IPI_TIMER as u32);
+        write_reg(APIC_TIMER_LVT, TIMER_PERIODIC | IPI_TIMER as u32);
         write_reg(APIC_TIMER_INIT_COUNT, ticks);
     }
 }
@@ -268,8 +268,10 @@ fn calibrate_timer() {
         write_reg(APIC_TIMER_INIT_COUNT, 0xFFFF_FFFF);
         write_reg(APIC_TIMER_LVT, TIMER_ONE_SHOT | LVT_MASK | IPI_TIMER as u32);
 
-        // Wait ~10ms using busy loop (in real kernel, use PIT)
-        for _ in 0..1_000_000 {
+        let ticks = crate::boottime::tsc_per_ms();
+        if ticks == 0 { APIC_FREQUENCY.store(0, Ordering::SeqCst); return; }
+        let start = crate::arch::x86_64::rdtsc();
+        while crate::arch::x86_64::rdtsc().wrapping_sub(start) < ticks * 10 {
             core::hint::spin_loop();
         }
 

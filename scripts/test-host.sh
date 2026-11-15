@@ -9,7 +9,16 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+mkdir -p target/host-tests
+for module in free_list; do
+    rustc --edition=2021 --test "kernel/src/mm/$module.rs" -o "target/host-tests/$module"
+    "target/host-tests/$module"
+done
+
 exec cargo test --locked \
+    -p bos-ipc-tests \
+    -p libbos \
+    -p bos-memory-tests \
     -p bfs \
     -p binit \
     -p bsh \

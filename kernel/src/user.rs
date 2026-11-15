@@ -1,14 +1,16 @@
-//! One synchronous ring-3 process, with private ELF mappings and a small ABI.
+//! BSP processes: private ELF mappings, spawn/wait, blocking I/O and round-robin.
 
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
+mod handles;
 use core::{
     arch::global_asm,
     ptr,
     sync::atomic::{AtomicPtr, Ordering},
 };
+use handles::{Handle, Pipe};
 use x86_64::{
     registers::{
-        control::{Cr0, Cr0Flags, Cr3},
+        control::{Cr0, Cr0Flags, Cr3, Cr4, Cr4Flags},
         model_specific::{Efer, EferFlags},
     },
     structures::{
@@ -47,13 +49,67 @@ unsafe extern "C" {
     fn enter_user(entry: u64, stack: u64) -> i64;
     fn leave_user(status: i64) -> !;
     pub fn user_syscall();
+    pub fn user_timer();
+    fn resume_user(context: *const Context) -> !;
 }
+
+// Layout matches the 15 pushes in user_timer, followed by the CPU iret frame.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Context {
+    registers: [u64; 15],
+    rip: u64,
+    cs: u64,
+    flags: u64,
+    rsp: u64,
+    ss: u64,
+}
+impl Context {
+    fn new(entry: u64) -> Self {
+        Self {
+            registers: [0; 15],
+            rip: entry,
+            cs: gdt::USER_CS64.0 as u64,
+            flags: 0x202,
+            rsp: STACK_TOP,
+            ss: gdt::USER_DS.0 as u64,
+        }
+    }
+}
+#[repr(C, align(16))]
+struct Fpu([u8; 512]);
+impl Fpu {
+    fn new() -> Self {
+        let mut state = Self([0; 512]);
+        state.0[0..2].copy_from_slice(&0x037fu16.to_le_bytes());
+        state.0[24..28].copy_from_slice(&0x1f80u32.to_le_bytes());
+        state
+    }
+    unsafe fn save(&mut self) {
+        core::arch::asm!("fxsave64 [{}]", in(reg) self.0.as_mut_ptr(), options(nostack));
+    }
+    unsafe fn restore(&self) {
+        core::arch::asm!("fxrstor64 [{}]", in(reg) self.0.as_ptr(), options(nostack));
+    }
+}
+struct Batch {
+    programs: Vec<Program>,
+    current: usize,
+    next_pid: u64,
+    native_init: bool,
+    kernel_root: PhysFrame,
+    input: [u8; 256],
+    input_head: usize,
+    input_len: usize,
+}
+static BATCH: AtomicPtr<Batch> = AtomicPtr::new(ptr::null_mut());
 
 struct Frames(Vec<PhysFrame>);
 
 unsafe impl FrameAllocator<Size4KiB> for Frames {
     fn allocate_frame(&mut self) -> Option<PhysFrame> {
-        let frame = phys::allocate_frame()?;
+        self.0.try_reserve(1).ok()?;
+        let frame = phys::allocate_user_frame()?;
         self.0.push(frame);
         Some(frame)
     }
@@ -67,17 +123,31 @@ impl Drop for Frames {
     }
 }
 
-struct Program {
+pub(crate) struct Program {
     frames: Frames,
     root: PhysFrame,
-    pages: Vec<(u64, PhysFrame)>,
+    pages: Vec<(u64, PhysFrame, Flags)>,
+    descriptors: [Option<Arc<Handle>>; 64],
+    pid: u64,
+    parent: u64,
+    reaped: bool,
+    blocked: Option<(u64, u64, u64, u64)>,
+    context: Context,
+    fpu: Fpu,
+    status: Option<i64>,
 }
 
 impl Program {
     fn new() -> Result<Self, &'static str> {
         let mut frames = Frames(Vec::new());
         let root = frames.allocate_frame().ok_or("out of memory")?;
-        let old = Cr3::read().0.start_address().as_u64() as *const PageTable;
+        let batch = BATCH.load(Ordering::Acquire);
+        let kernel_root = if batch.is_null() {
+            Cr3::read().0
+        } else {
+            unsafe { (*batch).kernel_root }
+        };
+        let old = kernel_root.start_address().as_u64() as *const PageTable;
         let new = root.start_address().as_u64() as *mut PageTable;
         unsafe {
             if !(&*old)[1].is_unused() {
@@ -90,13 +160,26 @@ impl Program {
             frames,
             root,
             pages: Vec::new(),
+            descriptors: core::array::from_fn(|i| match i {
+                0 => Some(Arc::new(Handle::ConsoleRead)),
+                1 | 2 => Some(Arc::new(Handle::ConsoleWrite)),
+                _ => None,
+            }),
+            pid: 0,
+            parent: 0,
+            reaped: false,
+            blocked: None,
+            context: Context::new(0),
+            fpu: Fpu::new(),
+            status: None,
         })
     }
 
     fn page(&mut self, address: u64, flags: Flags) -> Result<PhysFrame, &'static str> {
-        if self.pages.iter().any(|(page, _)| *page == address) {
+        if self.pages.iter().any(|(page, _, _)| *page == address) {
             return Err("overlapping ELF pages");
         }
+        self.pages.try_reserve(1).map_err(|_| "out of memory")?;
         let frame = self.frames.allocate_frame().ok_or("out of memory")?;
         unsafe {
             ptr::write_bytes(frame.start_address().as_u64() as *mut u8, 0, PAGE as usize);
@@ -110,10 +193,15 @@ impl Program {
                     flags | Flags::PRESENT | Flags::USER_ACCESSIBLE,
                     &mut self.frames,
                 )
-                .map_err(|_| "could not map a user page")?
+                .map_err(|error| match error {
+                    x86_64::structures::paging::mapper::MapToError::FrameAllocationFailed => {
+                        "out of memory"
+                    }
+                    _ => "could not map a user page",
+                })?
                 .ignore();
         }
-        self.pages.push((address, frame));
+        self.pages.push((address, frame, flags));
         Ok(frame)
     }
 
@@ -151,15 +239,181 @@ impl Program {
         Ok(())
     }
 
-    fn read_user(&self, address: u64, output: &mut [u8]) -> Result<(), ()> {
+    fn validate_write(&self, address: u64, length: usize) -> Result<(), i64> {
+        let end = address.checked_add(length as u64).ok_or(-14i64)?;
+        let mut cursor = address;
+        while cursor < end {
+            let base = cursor & !(PAGE - 1);
+            if !self
+                .pages
+                .iter()
+                .any(|(p, _, flags)| *p == base && flags.contains(Flags::WRITABLE))
+            {
+                return Err(-14);
+            }
+            cursor = (base + PAGE).min(end);
+        }
+        Ok(())
+    }
+
+    fn write_user(&self, address: u64, input: &[u8]) -> Result<(), i64> {
+        self.validate_write(address, input.len())?;
+        let mut offset = 0;
+        while offset < input.len() {
+            let cursor = address + offset as u64;
+            let base = cursor & !(PAGE - 1);
+            let (_, frame, _) = self
+                .pages
+                .iter()
+                .find(|(p, _, _)| *p == base)
+                .ok_or(-14i64)?;
+            let local = cursor - base;
+            let length = ((PAGE - local) as usize).min(input.len() - offset);
+            unsafe {
+                ptr::copy_nonoverlapping(
+                    input.as_ptr().add(offset),
+                    (frame.start_address().as_u64() + local) as *mut u8,
+                    length,
+                );
+            }
+            offset += length;
+        }
+        Ok(())
+    }
+
+    fn path(&self, address: u64) -> Result<alloc::string::String, i64> {
+        let mut bytes = Vec::new();
+        for offset in 0..4096 {
+            let mut byte = [0];
+            self.read_user(address.checked_add(offset).ok_or(-14i64)?, &mut byte)
+                .map_err(|_| -14i64)?;
+            if byte[0] == 0 {
+                return alloc::string::String::from_utf8(bytes).map_err(|_| -22i64);
+            }
+            bytes.try_reserve(1).map_err(|_| -12i64)?;
+            bytes.push(byte[0]);
+        }
+        Err(-36)
+    }
+
+    fn descriptor(&self, fd: u64) -> Result<Arc<Handle>, i64> {
+        self.descriptors
+            .get(fd as usize)
+            .and_then(Clone::clone)
+            .ok_or(-9)
+    }
+
+    pub(crate) fn file_call(&mut self, number: u64, a: u64, b: u64, c: u64) -> Result<i64, i64> {
+        use crate::fs::{self, VFS};
+        let error = |e| crate::syscall::fs_err(e) as i64;
+        match number {
+            74 => {
+                let fd = self.descriptor(a)?;
+                if !matches!(&*fd, Handle::File(_)) {
+                    return Err(-22);
+                }
+                VFS.lock().sync().map_err(error)?;
+                Ok(0)
+            }
+            162 => {
+                VFS.lock().sync().map_err(error)?;
+                Ok(0)
+            }
+            22 => {
+                self.validate_write(a, 8)?;
+                let slots: Vec<_> = (3..64)
+                    .filter(|i| self.descriptors[*i].is_none())
+                    .take(2)
+                    .collect();
+                if slots.len() != 2 {
+                    return Err(-24);
+                }
+                let (read, write) = Pipe::pair();
+                let mut pair = [0u8; 8];
+                pair[..4].copy_from_slice(&(slots[0] as u32).to_le_bytes());
+                pair[4..].copy_from_slice(&(slots[1] as u32).to_le_bytes());
+                self.write_user(a, &pair)?;
+                self.descriptors[slots[0]] = Some(read);
+                self.descriptors[slots[1]] = Some(write);
+                Ok(0)
+            }
+            33 => {
+                if b >= 64 {
+                    return Err(-9);
+                }
+                let handle = self.descriptor(a)?;
+                self.descriptors[b as usize] = Some(handle);
+                Ok(b as i64)
+            }
+            39 => Ok(self.pid as i64),
+            110 => Ok(self.parent as i64),
+            2 => {
+                let path = self.path(a)?;
+                let allowed = fs::O_ACCMODE
+                    | fs::O_CREAT
+                    | fs::O_EXCL
+                    | fs::O_TRUNC
+                    | fs::O_APPEND
+                    | fs::O_DIRECTORY;
+                if b > u32::MAX as u64
+                    || b as u32 & !allowed != 0
+                    || b as u32 & fs::O_ACCMODE == fs::O_ACCMODE
+                {
+                    return Err(-22);
+                }
+                let slot = (3..self.descriptors.len())
+                    .find(|i| self.descriptors[*i].is_none())
+                    .ok_or(-24i64)?;
+                self.descriptors[slot] = Some(Arc::new(Handle::File(
+                    VFS.lock().open(&path, b as u32).map_err(error)?,
+                )));
+                Ok(slot as i64)
+            }
+            3 => {
+                let fd = self.descriptor(a)?;
+                drop(fd);
+                self.descriptors[a as usize] = None;
+                Ok(0)
+            }
+            8 => {
+                let fd = self.descriptor(a)?;
+                if c > 2 {
+                    return Err(-22);
+                }
+                fd.seek(b as i64, c as u32)
+            }
+            0 | 1 => {
+                let fd = self.descriptor(a)?;
+                if c > 4096 {
+                    return Err(-22);
+                }
+                let mut buffer = [0u8; 4096];
+                let buffer = &mut buffer[..c as usize];
+                if number == 0 {
+                    // Validate the whole destination before advancing the file offset.
+                    self.validate_write(b, buffer.len())?;
+                    let n = fd.read(buffer)?;
+                    self.write_user(b, &buffer[..n])?;
+                    Ok(n as i64)
+                } else {
+                    self.read_user(b, buffer).map_err(|_| -14i64)?;
+                    Ok(fd.write(buffer)? as i64)
+                }
+            }
+            _ => Err(-38),
+        }
+    }
+
+    pub(crate) fn read_user(&self, address: u64, output: &mut [u8]) -> Result<(), ()> {
+        address.checked_add(output.len() as u64).ok_or(())?;
         let mut address = address;
         let mut offset = 0;
         while offset < output.len() {
             let page = address & !(PAGE - 1);
-            let (_, frame) = self
+            let (_, frame, _) = self
                 .pages
                 .iter()
-                .find(|(base, _)| *base == page)
+                .find(|(base, _, _)| *base == page)
                 .ok_or(())?;
             let local = address - page;
             let length = ((PAGE - local) as usize).min(output.len() - offset);
@@ -174,7 +428,7 @@ impl Program {
     }
 }
 
-pub fn run(data: &[u8]) -> Result<i64, &'static str> {
+fn load_program(data: &[u8]) -> Result<Program, &'static str> {
     let executable = Executable::parse(data)?;
     let mut program = Program::new()?;
     let mut valid_entry = false;
@@ -192,66 +446,385 @@ pub fn run(data: &[u8]) -> Result<i64, &'static str> {
         program.page(address, Flags::WRITABLE | Flags::NO_EXECUTE)?;
     }
 
+    program.context.rip = executable.entry;
+    Ok(program)
+}
+
+pub fn run(data: &[u8]) -> Result<i64, &'static str> {
+    Ok(run_many(&[data])?[0])
+}
+
+/// Bounded BSP scheduler. All images are validated before any user code runs.
+/// Kernel execution stays non-preemptible until blocking syscall continuations land.
+pub fn run_init(image: &[u8]) -> Result<Vec<i64>, &'static str> {
+    run_session(&[image], true)
+}
+pub fn run_many(images: &[&[u8]]) -> Result<Vec<i64>, &'static str> {
+    run_session(images, false)
+}
+fn run_session(images: &[&[u8]], native_init: bool) -> Result<Vec<i64>, &'static str> {
+    if images.is_empty() || images.len() > 16 {
+        return Err("expected 1 to 16 programs");
+    }
+    if !BATCH.load(Ordering::Acquire).is_null() {
+        return Err("nested user launch");
+    }
+    if crate::arch::x86_64::apic::timer_frequency() == 0 {
+        return Err("APIC timer unavailable");
+    }
+    let mut batch = Batch {
+        programs: Vec::new(),
+        current: 0,
+        next_pid: 1,
+        native_init,
+        kernel_root: Cr3::read().0,
+        input: [0; 256],
+        input_head: 0,
+        input_len: 0,
+    };
+    batch
+        .programs
+        .try_reserve(64)
+        .map_err(|_| "out of memory")?;
+    for image in images {
+        let mut program = load_program(image)?;
+        program.pid = batch.next_pid;
+        batch.next_pid += 1;
+        batch.programs.push(program);
+    }
+    let mut statuses = Vec::new();
+    statuses
+        .try_reserve(images.len())
+        .map_err(|_| "out of memory")?;
     let (previous_root, flags) = Cr3::read();
     let cr0 = Cr0::read();
+    let cr4 = Cr4::read();
     let efer = Efer::read();
-    ACTIVE.store(ptr::addr_of_mut!(program), Ordering::Release);
-    let status = unsafe {
-        // This ABI uses int 0x80 only. Deny user FPU access until context switching exists.
-        Efer::update(|flags| flags.remove(EferFlags::SYSTEM_CALL_EXTENSIONS));
-        Cr0::update(|flags| flags.insert(Cr0Flags::TASK_SWITCHED));
-        Cr3::write(program.root, flags);
-        let status = enter_user(executable.entry, STACK_TOP);
+    let mut kernel_fpu = Fpu::new();
+    BATCH.store(ptr::addr_of_mut!(batch), Ordering::Release);
+    ACTIVE.store(ptr::addr_of_mut!(batch.programs[0]), Ordering::Release);
+    unsafe {
+        Efer::update(|f| f.remove(EferFlags::SYSTEM_CALL_EXTENSIONS));
+        Cr0::update(|f| f.remove(Cr0Flags::TASK_SWITCHED | Cr0Flags::EMULATE_COPROCESSOR));
+        Cr4::update(|f| {
+            f.insert(Cr4Flags::OSFXSR | Cr4Flags::OSXMMEXCPT_ENABLE);
+            // FXSAVE covers x87/SSE only. Do not expose unsaved AVX state.
+            f.remove(Cr4Flags::OSXSAVE);
+        });
+        kernel_fpu.save();
+        batch.programs[0].fpu.restore();
+        Cr3::write(batch.programs[0].root, flags);
+        crate::arch::x86_64::apic::set_timer_periodic(
+            crate::arch::x86_64::apic::timer_frequency() / 100,
+        );
+        enter_user(batch.programs[0].context.rip, STACK_TOP);
+        crate::arch::x86_64::apic::stop_timer();
         Cr3::write(previous_root, flags);
+        kernel_fpu.restore();
+        Cr4::write(cr4);
         Cr0::write(cr0);
         Efer::write(efer);
-        status
-    };
+    }
     ACTIVE.store(ptr::null_mut(), Ordering::Release);
-    Ok(status)
+    BATCH.store(ptr::null_mut(), Ordering::Release);
+    for program in batch.programs.iter().take(images.len()) {
+        statuses.push(program.status.unwrap_or(-1));
+    }
+    Ok(statuses)
+}
+
+fn poll_input(batch: &mut Batch) {
+    for _ in 0..32 {
+        let Some(byte) =
+            crate::arch::x86_64::serial::try_read_byte().or_else(crate::bsh::native_keyboard_byte)
+        else {
+            break;
+        };
+        if byte == 3 {
+            // Keep PID 1 alive in the native boot session; batch roots have parent 0.
+            let native_init = batch.native_init;
+            for p in &mut batch.programs {
+                if p.status.is_none() && (!native_init || p.pid != 1) {
+                    finish(p, 130);
+                }
+            }
+            if native_init {
+                for p in &mut batch.programs {
+                    if p.pid != 1 {
+                        p.parent = 1;
+                    }
+                }
+            }
+        } else if batch.input_len < 256 {
+            let tail = (batch.input_head + batch.input_len) % 256;
+            batch.input[tail] = byte;
+            batch.input_len += 1;
+        }
+    }
+}
+fn input_byte() -> Option<u8> {
+    unsafe {
+        let batch = BATCH.load(Ordering::Acquire);
+        if batch.is_null() || (*batch).input_len == 0 {
+            return None;
+        }
+        let head = (*batch).input_head;
+        let byte = (*batch).input[head];
+        (*batch).input_head = (head + 1) % 256;
+        (*batch).input_len -= 1;
+        Some(byte)
+    }
+}
+fn finish(program: &mut Program, status: i64) {
+    program.status = Some(status);
+    program.blocked = None;
+    for fd in &mut program.descriptors {
+        *fd = None;
+    }
+}
+
+unsafe fn select_next(batch: *mut Batch) -> *const Context {
+    loop {
+        poll_input(&mut *batch);
+        crate::drivers::net::poll();
+        for distance in 1..=(*batch).programs.len() {
+            let index = ((*batch).current + distance) % (*batch).programs.len();
+            if (*batch).programs[index].status.is_some() {
+                continue;
+            }
+            if let Some((nr, a, b, c)) = (*batch).programs[index].blocked {
+                let result = process_call(batch, index, nr, a, b, c);
+                if result == -11 {
+                    continue;
+                }
+                (*batch).programs[index].blocked = None;
+                (*batch).programs[index].context.registers[14] = result as u64;
+            }
+            (*batch).current = index;
+            let program = &mut (*batch).programs[index];
+            ACTIVE.store(program, Ordering::Release);
+            let flags = Cr3::read().1;
+            Cr3::write(program.root, flags);
+            program.fpu.restore();
+            return &program.context;
+        }
+        if (*batch).programs.iter().all(|p| p.status.is_some()) {
+            leave_user(0);
+        }
+        // IRQs do not switch kernel continuations. Timer wakes idle to check input.
+        core::arch::asm!("sti; hlt; cli", options(nomem, nostack));
+    }
+}
+
+#[unsafe(no_mangle)]
+unsafe extern "C" fn switch_user_timer(context: *const Context) -> *const Context {
+    crate::arch::x86_64::apic::send_eoi();
+    let batch = BATCH.load(Ordering::Acquire);
+    if batch.is_null() || (*context).cs & 3 != 3 {
+        return context;
+    }
+    let current = &mut (*batch).programs[(*batch).current];
+    current.context = *context;
+    current.fpu.save();
+    select_next(batch)
+}
+
+unsafe fn process_call(batch: *mut Batch, index: usize, nr: u64, a: u64, b: u64, c: u64) -> i64 {
+    match nr {
+        1004 => spawn(batch, index, a, b, c).unwrap_or_else(|e| e),
+        61 => wait_child(batch, index, a, b, c).unwrap_or_else(|e| e),
+        _ => {
+            ACTIVE.store(&mut (*batch).programs[index], Ordering::Release);
+            crate::syscall::dispatch(nr, a, b, c)
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+unsafe extern "C" fn switch_user_syscall(context: *const Context) -> *const Context {
+    let batch = BATCH.load(Ordering::Acquire);
+    let index = (*batch).current;
+    {
+        let program = &mut (*batch).programs[index];
+        program.context = *context;
+        program.fpu.save();
+    }
+    let registers = (*context).registers;
+    let (nr, a, b, c) = (registers[14], registers[8], registers[9], registers[11]);
+    if nr == 60 {
+        terminate(batch, index, (a & 255) as i64);
+    } else {
+        let result = process_call(batch, index, nr, a, b, c);
+        let program = &mut (*batch).programs[index];
+        if result == -11 && matches!(nr, 0 | 1 | 61) {
+            program.blocked = Some((nr, a, b, c));
+        } else {
+            program.context.registers[14] = result as u64;
+        }
+    }
+    select_next(batch)
+}
+
+unsafe fn terminate(batch: *mut Batch, index: usize, status: i64) {
+    let pid = (*batch).programs[index].pid;
+    finish(&mut (*batch).programs[index], status);
+    let adopter = if pid != 1
+        && (*batch)
+            .programs
+            .iter()
+            .any(|p| p.pid == 1 && p.status.is_none())
+    {
+        1
+    } else {
+        0
+    };
+    for p in &mut (*batch).programs {
+        if p.parent == pid {
+            p.parent = adopter;
+        }
+    }
+}
+
+unsafe fn spawn(
+    batch: *mut Batch,
+    index: usize,
+    path: u64,
+    mappings: u64,
+    count: u64,
+) -> Result<i64, i64> {
+    if count > 64 {
+        return Err(-22);
+    }
+    let parent = &(*batch).programs[index];
+    let name = parent.path(path)?;
+    let mut inherited: [Option<Arc<Handle>>; 64] = core::array::from_fn(|i| {
+        if i < 3 {
+            parent.descriptors[i].clone()
+        } else {
+            None
+        }
+    });
+    let mut seen = 0u64;
+    for n in 0..count {
+        let mut pair = [0; 8];
+        parent
+            .read_user(mappings.checked_add(n * 8).ok_or(-14i64)?, &mut pair)
+            .map_err(|_| -14i64)?;
+        let from = u32::from_le_bytes(pair[..4].try_into().unwrap()) as u64;
+        let to = u32::from_le_bytes(pair[4..].try_into().unwrap()) as usize;
+        if to >= 64 || seen & (1 << to) != 0 {
+            return Err(-22);
+        }
+        seen |= 1 << to;
+        inherited[to] = Some(parent.descriptor(from)?);
+    }
+    let parent_pid = parent.pid;
+    let slot = (*batch).programs.iter().position(|p| p.reaped);
+    if slot.is_none() && (*batch).programs.len() >= 64 {
+        return Err(-11);
+    }
+    let bytes = {
+        let mut vfs = crate::fs::VFS.lock();
+        let stat = vfs
+            .stat(&name)
+            .map_err(|e| crate::syscall::fs_err(e) as i64)?;
+        if stat.is_dir() || stat.size > 4 * 1024 * 1024 {
+            return Err(-8);
+        }
+        vfs.read_file(&name)
+            .map_err(|e| crate::syscall::fs_err(e) as i64)?
+    };
+    let mut child =
+        load_program(&bytes).map_err(|e| if e == "out of memory" { -12i64 } else { -8i64 })?;
+    child.pid = (*batch).next_pid;
+    child.parent = parent_pid;
+    child.descriptors = inherited;
+    let pid = child.pid;
+    (*batch).next_pid = pid.checked_add(1).ok_or(-11i64)?;
+    if let Some(slot) = slot {
+        (*batch).programs[slot] = child;
+    } else {
+        (*batch).programs.push(child);
+    }
+    Ok(pid as i64)
+}
+
+unsafe fn wait_child(
+    batch: *mut Batch,
+    index: usize,
+    pid: u64,
+    status: u64,
+    flags: u64,
+) -> Result<i64, i64> {
+    if flags > 1 || (pid != u64::MAX && pid == 0) {
+        return Err(-22);
+    }
+    let parent = &(*batch).programs[index];
+    if status != 0 {
+        parent.validate_write(status, 8)?;
+    }
+    let parent_pid = parent.pid;
+    let mut found = false;
+    let mut zombie = None;
+    for (i, p) in (*batch).programs.iter().enumerate() {
+        if !p.reaped && p.parent == parent_pid && (pid == u64::MAX || p.pid == pid) {
+            found = true;
+            if p.status.is_some() {
+                zombie = Some(i);
+                break;
+            }
+        }
+    }
+    if let Some(child) = zombie {
+        let result = (*batch).programs[child].pid;
+        let value = (*batch).programs[child].status.unwrap();
+        if status != 0 {
+            (*batch).programs[index].write_user(status, &value.to_le_bytes())?;
+        }
+        // Switch off a zombie's root before releasing its page tables.
+        Cr3::write((*batch).kernel_root, Cr3::read().1);
+        let p = &mut (*batch).programs[child];
+        p.reaped = true;
+        p.pages.clear();
+        for frame in p.frames.0.drain(..) {
+            phys::deallocate_frame(frame);
+        }
+        Ok(result as i64)
+    } else if !found {
+        Err(-10)
+    } else if flags == 1 {
+        Ok(0)
+    } else {
+        Err(-11)
+    }
 }
 
 pub fn abort_on_fault(frame: &InterruptStackFrame, vector: i64) {
     if frame.code_segment.rpl() == PrivilegeLevel::Ring3
         && !ACTIVE.load(Ordering::Acquire).is_null()
     {
-        unsafe {
-            leave_user(-vector - 1);
-        }
+        exit(-vector - 1);
     }
 }
 
-#[unsafe(no_mangle)]
-extern "C" fn dispatch_user_syscall(number: u64, arg0: u64, arg1: u64, arg2: u64) -> i64 {
+/// The synchronous launcher owns Program for the duration of ring-3 execution.
+/// Interrupts are disabled during kernel execution. This BSP-only state
+/// must become per-CPU before enabling SMP user execution.
+pub(crate) fn with_active_program(f: impl FnOnce(&mut Program) -> i64) -> i64 {
     let active = ACTIVE.load(Ordering::Acquire);
     if active.is_null() {
         return -38;
     }
-    match number {
-        1 => {
-            if !matches!(arg0, 1 | 2) {
-                return -9;
-            }
-            if arg2 > 4096 {
-                return -22;
-            }
-            let mut buffer = [0; 4096];
-            let output = &mut buffer[..arg2 as usize];
-            if unsafe { (*active).read_user(arg1, output) }.is_err() {
-                return -14;
-            }
-            let output = alloc::string::String::from_utf8_lossy(output);
-            for part in output.split_inclusive('\n') {
-                if let Some(line) = part.strip_suffix('\n') {
-                    console::print(line.trim_end_matches('\r'));
-                    console::print("\r\n");
-                } else {
-                    console::print(part);
-                }
-            }
-            arg2 as i64
+    unsafe { f(&mut *active) }
+}
+
+pub(crate) fn exit(status: i64) -> ! {
+    unsafe {
+        let batch = BATCH.load(Ordering::Acquire);
+        if batch.is_null() {
+            leave_user(status);
         }
-        60 => unsafe { leave_user((arg0 & 0xff) as i64) },
-        _ => -38,
+        terminate(batch, (*batch).current, status);
+        resume_user(select_next(batch));
     }
 }

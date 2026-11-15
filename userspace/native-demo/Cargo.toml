@@ -1,0 +1,62 @@
+[package]
+name = "bos-native-demo"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+libbos = { path = "../libbos" }
+
+[[bin]]
+name = "bos-native-demo"
+path = "src/main.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "process-test"
+path = "src/process-test.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "pipe-reader"
+path = "src/pipe-reader.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "pipe-writer"
+path = "src/pipe-writer.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "child-exit"
+path = "src/child-exit.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "native-init"
+path = "src/native-init.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "native-shell"
+path = "src/native-shell.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "native-cat"
+path = "src/native-cat.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "native-wc"
+path = "src/native-wc.rs"
+test = false
+bench = false

@@ -53,3 +53,5 @@ pub fn dispatch_pci(d: pci::PciDev) {
     if audio::probe_pci(d) { return; }
     let _ = d;
 }
+
+pub mod data_disk;
