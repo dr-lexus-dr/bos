@@ -660,7 +660,11 @@ impl Desktop {
                         None
                     }
                     Cmd::Go => Some(b.address.value.clone()),
-                    Cmd::Reload => Some(b.history[b.index].clone()),
+                    Cmd::Reload => Some(if b.error {
+                        b.address.value.clone()
+                    } else {
+                        b.history[b.index].clone()
+                    }),
                     Cmd::Home => Some("about:home".into()),
                     Cmd::Back if b.index > 0 => {
                         travel = Some(b.index - 1);

@@ -171,7 +171,27 @@ pub fn content(
                 Cmd::Address,
             );
             ui.button(rect(x + w - 32, y + 4, 27, 29), "→", Cmd::Go, false);
-            if br.home() {
+            if br.error {
+                ui.text(
+                    x + 20,
+                    y + 65,
+                    l.t("Could not open this page", "Не удалось открыть страницу"),
+                    2,
+                );
+                ui.dim(x + 20, y + 107, super::local_error(&br.status, l), w - 40);
+                ui.button(
+                    rect(x + 20, y + 153, 105, 31),
+                    l.t("Try again", "Повторить"),
+                    Cmd::Reload,
+                    true,
+                );
+                ui.button(
+                    rect(x + 135, y + 153, 115, 31),
+                    l.t("Bookmarks", "Закладки"),
+                    Cmd::Home,
+                    false,
+                );
+            } else if br.home() {
                 ui.text(x + 21, y + 56, l.t("Bookmarks", "Закладки"), 3);
                 for (i, (name, url)) in BOOKMARKS.iter().enumerate() {
                     let r = rect(x + 16, y + 106 + i as i32 * 53, w - 32, 51);
@@ -218,10 +238,8 @@ pub fn content(
                 }
                 ui.hit(area, Cmd::WebContent);
             }
-            if br.error || !br.home() || br.loading {
-                let status = if br.error {
-                    super::local_error(&br.status, l).into()
-                } else if br.loading {
+            if !br.error && (!br.home() || br.loading) {
+                let status = if br.loading {
                     l.t("Loading page…", "Загрузка страницы…").into()
                 } else {
                     format!(

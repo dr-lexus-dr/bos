@@ -106,7 +106,7 @@ impl Browser {
         }
     }
     pub fn home(&self) -> bool {
-        self.history[self.index] == "about:home" && !self.loading
+        self.history[self.index] == "about:home" && !self.loading && !self.error
     }
     pub fn focus(&mut self) {
         self.editing = true;
@@ -171,6 +171,7 @@ impl Browser {
         match Url::parse(address) {
             Ok(u) => {
                 let url = u.address();
+                self.frame = None;
                 self.address = Edit::new(&url);
                 self.loading = true;
                 self.size = size;
@@ -192,11 +193,15 @@ impl Browser {
     fn fail(&mut self, e: String) {
         log::info!("Browser: {e}");
         self.error = true;
+        self.frame = None;
         self.status = e;
         self.loading = false;
         self.travel = None;
     }
     pub fn event(&mut self, kind: u32, a: i32, b: i32, s: &str) {
+        if self.error || (self.frame.is_none() && kind != 1) {
+            return;
+        }
         if let Some(view) = &mut self.view {
             view.event(kind, a, b, s);
         }
@@ -252,6 +257,11 @@ impl Browser {
         }
         if let Some(f) = view.take_frame() {
             if !f.ready {
+                if !self.editing {
+                    self.address = Edit::new(&f.url);
+                }
+                self.loading = true;
+                self.error = false;
                 log::debug!("Browser first paint: {} {}", f.url, f.title);
                 self.frame = Some(f);
                 return true;
