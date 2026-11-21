@@ -9,11 +9,14 @@
 
 mod calculator;
 mod babo;
-mod line;
+pub(crate) mod line;
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use alloc::vec;
+use core::sync::atomic::{AtomicBool, Ordering};
+
+static COMMAND_FAILED: AtomicBool = AtomicBool::new(false);
 use log::info;
 use x86_64::instructions::port::Port;
 
@@ -36,9 +39,12 @@ pub fn run(boot_info: &'static bloader_shared::BootInfo) -> ! {
     let storage = fs::init(boot_info);
     crate::drivers::net::init();
     cmd_cd(None);
-    let recovery=fs::VFS.lock().stat("/system/recovery").is_ok()
-        || boot_info.cmdline_str().split_whitespace().any(|arg|arg=="recovery");
-    print_str(if recovery { "\x1b[97mbOS kernel console (bSH) v" } else { "\x1b[97mbOS native session v" });
+    let mode=|name:&str|boot_info.cmdline_str().split_whitespace().any(|s|s==name)||
+        fs::VFS.lock().stat(&alloc::format!("/system/{name}")).is_ok();
+    let recovery=mode("recovery");
+    let native=!recovery&&(mode("native")||mode("nash"));
+    if !recovery&&!native&&!mode("bsh"){crate::desktop::run();}
+    print_str(if !native { "\x1b[97mbOS kernel console (bSH) v" } else { "\x1b[97mbOS native session v" });
     print_str(KERNEL_VERSION);
     print_str("\x1b[0m");
     print_str(" — type 'help'\r\n");
@@ -51,19 +57,41 @@ pub fn run(boot_info: &'static bloader_shared::BootInfo) -> ! {
         let _color = ColorGuard::new(Color::Yellow);
         print_line("warning: the previous boot ended in a kernel panic; run 'crashlog' to read it");
     }
-    if !recovery {
+    if native {
         let init=fs::VFS.lock().read_file("/applications/native-init.bh");
         match init {
-            Ok(image)=>{ let _=crate::user::run_init(&image); },
+            Ok(image)=>{ if let Err(error)=crate::user::run_init(&image){print_error(error);} },
             Err(_)=>print_error("init image unavailable"),
         }
         print_error("PID 1 terminated; entering recovery console");
     }
+    if !recovery {
+        print_str("\x1b[96mbSH\x1b[0m / bOS\r\n");
+        print_str("\x1b[90mAll commands available | Tab completes commands and paths | help\x1b[0m\r\n");
+    }
     let mut history = line::History::new();
     loop {
         let cwd = fs::VFS.lock().get_cwd();
-        let command = line::read(&alloc::format!("bSH:{}# ", cwd), Some(&history));
+        let prompt = if recovery {
+            alloc::format!("bSH:{}# ", cwd)
+        } else {
+            let directory = if cwd == DEFAULT_HOME { String::from("~") }
+                else if let Some(tail) = cwd.strip_prefix("/users/default/") { alloc::format!("~/{}", tail) }
+                else { cwd.clone() };
+            let color = if COMMAND_FAILED.load(Ordering::Relaxed) { 91 } else { 92 };
+            alloc::format!("\x1b[96mbSH \x1b[94m{} \x1b[{}m% \x1b[0m", directory, color)
+        };
+        let command = line::read(&prompt, Some(&history));
+        if command.trim().is_empty() { continue; }
         history.record(&command);
+        if command.trim()=="history" {for (n,c) in history.entries().iter().enumerate(){print_line(&alloc::format!("{}  {c}",n+1));}continue;}
+        COMMAND_FAILED.store(false, Ordering::Relaxed);
+        if command.trim() == "exit" {
+            cmd_cd(None);
+            history = line::History::new();
+            print_line("bSH: new session");
+            continue;
+        }
         exec(&command, boot_info.kernel_uuid);
     }
 }
@@ -72,8 +100,29 @@ pub fn run(boot_info: &'static bloader_shared::BootInfo) -> ! {
 // command dispatch
 // ---------------------------------------------------------------------------
 
+static WINDOW_JOB:core::sync::atomic::AtomicU64=core::sync::atomic::AtomicU64::new(0);
+pub(crate) fn window_command(line: &str,cwd:&mut String)->(String,Option<u64>){
+    let old = fs::VFS.lock().get_cwd();
+    let _ = fs::VFS.lock().set_cwd(cwd);
+    let output = console::capture(|| exec(line, uuid::Uuid::nil()));
+    *cwd = fs::VFS.lock().get_cwd();
+    let _ = fs::VFS.lock().set_cwd(&old);
+    let pid=WINDOW_JOB.swap(0,Ordering::Relaxed);(output,(pid!=0).then_some(pid))
+}
+pub(crate) fn expression(input:&str)->Result<i64, &'static str> { calculator::evaluate(input) }
+pub(crate) fn power(restart:bool) {
+    if sync_before_shutdown() {
+        if restart { reboot(); }
+        unsafe { x86_64::instructions::port::Port::<u16>::new(0x604).write(0x2000); x86_64::instructions::port::Port::<u16>::new(0xb004).write(0x2000); }
+        halt();
+    }
+}
 fn exec(line: &str, kernel_uuid: uuid::Uuid) {
-    let (toks, redirections) = match tokenize(line).and_then(split_redir) {
+    let tokens = match tokenize(line) { Ok(tokens) => tokens, Err(error) => return print_error(error) };
+    if tokens.iter().any(|token| matches!(token, Token::Pipe)) {
+        return pipeline(tokens, kernel_uuid);
+    }
+    let (toks, redirections) = match split_redir(tokens) {
         Ok(parsed) => parsed,
         Err(error) => {
             print_error(error);
@@ -84,6 +133,7 @@ fn exec(line: &str, kernel_uuid: uuid::Uuid) {
         return;
     }
     let cmd = match toks[0].as_str() {
+        "h"|"?"=>"help",
         "calculator.bh" | "/applications/calculator.bh" => "calculator",
         "notepad.bh" | "/applications/notepad.bh" => "notepad",
         "./calculator.bh" if fs::VFS.lock().get_cwd() == "/applications" => "calculator",
@@ -92,6 +142,25 @@ fn exec(line: &str, kernel_uuid: uuid::Uuid) {
     };
     let args: Vec<&str> = toks[1..].iter().map(|s| s.as_str()).collect();
 
+    if cmd == "gui" {
+        if !args.is_empty() || redirections.input.is_some() || redirections.output.is_some() {
+            return print_error("usage: gui");
+        }
+        if !crate::desktop::run() { print_error("gui: a 32-bit framebuffer of at least 320x250 is required"); }
+        return;
+    }
+
+    if cmd == "native" {
+        if !args.is_empty() || redirections.input.is_some() || redirections.output.is_some() {
+            return print_error("usage: native");
+        }
+        let image = fs::VFS.lock().read_file("/applications/native-shell.bh");
+        match image {
+            Ok(image) => { if let Err(error) = crate::user::run(&image) { print_error(error); } }
+            Err(error) => print_error(&alloc::format!("native: {}", fs_err(error))),
+        }
+        return;
+    }
     if cmd == "runall" {
         if redirections.input.is_some() || redirections.output.is_some() {
             return print_error("runall: redirection unavailable");
@@ -118,18 +187,13 @@ fn exec(line: &str, kernel_uuid: uuid::Uuid) {
         }
         return;
     }
-    if cmd == "run" || cmd.starts_with('/') || cmd.starts_with("./") || cmd.starts_with("../") {
+    if cmd == "run" || matches!(cmd,"hello"|"primes"|"guess"|"counter"|"spin"|"crash") || cmd.starts_with('/') || cmd.starts_with("./") || cmd.starts_with("../") {
         if redirections.input.is_some() || redirections.output.is_some() {
             print_error("run: redirection is unavailable for user programs");
             return;
         }
-        let path = match (cmd, args.as_slice()) {
-            ("run", [path]) => *path,
-            ("run", _) => return print_error("usage: run <program.bh>"),
-            (path, []) => path,
-            _ => return print_error("run: arguments are unavailable for user programs"),
-        };
-        run_program(path);
+        let (path,argv)=if cmd=="run" {let Some((p,rest))=args.split_first()else{return print_error("usage: run PROGRAM [ARGS]");};(*p,rest)}else{(cmd,args.as_slice())};
+        run_program(path,argv);
         return;
     }
 
@@ -153,6 +217,9 @@ fn exec(line: &str, kernel_uuid: uuid::Uuid) {
             _ => print_error("usage: notepad [file]"),
         },
         "calculator" if interactive_calculator => return calculator_prompt(),
+        "shutdown" | "poweroff" => { power(false); return; }
+        "settings" => { crate::desktop::settings(); return; }
+        "cli" => return,
         "reboot" => {
             if !sync_before_shutdown() { return; }
             print_str("rebooting...\r\n");
@@ -199,6 +266,49 @@ fn exec(line: &str, kernel_uuid: uuid::Uuid) {
     }
 }
 
+/// Builtin pipeline stages share the VFS but exchange only captured UTF-8 output.
+/// Native process pipes remain available in the explicit `native` test session.
+fn pipeline(tokens: Vec<Token>, kernel_uuid: uuid::Uuid) {
+    let mut groups = vec![Vec::new()];
+    for token in tokens {
+        if matches!(token, Token::Pipe) {
+            if groups.last().unwrap().is_empty() || groups.len() >= 8 { return print_error("bSH: invalid pipeline (max 8 stages)"); }
+            groups.push(Vec::new());
+        } else { groups.last_mut().unwrap().push(token); }
+    }
+    let mut stages = Vec::new();
+    for group in groups {
+        let (words, redirs) = match split_redir(group) { Ok(parsed) => parsed, Err(error) => return print_error(error) };
+        let Some(name) = words.first() else { return print_error("bSH: empty pipeline stage"); };
+        if !COMMANDS.iter().any(|(command, _)| *command == name)
+            || matches!(name.as_str(), "cd"|"gui"|"edit"|"babo"|"notepad"|"reboot"|"halt"|"clear"|"run"|"runall"|"native"|"exit"|"calculator.bh")
+            || name == "calculator" && words.len() == 1 {
+            return print_error("bSH: pipelines support non-interactive built-in commands");
+        }
+        stages.push((words, redirs));
+    }
+    let mut input: Option<Vec<u8>> = None;
+    let count = stages.len();
+    for (index, (words, redirs)) in stages.into_iter().enumerate() {
+        if let Some(path) = redirs.input {
+            let data = fs::VFS.lock().read_file(&path);
+            match data { Ok(data) => input = Some(data), Err(error) => return print_error(&alloc::format!("bSH: {}: {}", path, fs_err(error))) }
+        }
+        let args: Vec<&str> = words[1..].iter().map(String::as_str).collect();
+        let mut output = String::new();
+        let status = run_capture(&words[0], &args, input.as_deref(), kernel_uuid, &mut output);
+        if status != 0 { return print_output(&words[0], status, &output); }
+        let data = output.replace("\r\n", "\n").into_bytes();
+        if data.len() > 1024*1024 { return print_error("bSH: pipeline output exceeds 1 MiB"); }
+        if let Some((path, append)) = redirs.output {
+            let result = { let mut vfs = fs::VFS.lock(); if append { vfs.append_file(&path, &data) } else { vfs.write_file(&path, &data) } };
+            if let Err(error) = result { return print_error(&alloc::format!("bSH: {}: {}", path, fs_err(error))); }
+            input = Some(Vec::new());
+        } else if index+1 == count { print_output(&words[0], 0, &output); }
+        else { input = Some(data); }
+    }
+}
+
 fn command_color(command: &str) -> Color {
     match command {
         "calculator" => Color::Yellow,
@@ -212,6 +322,7 @@ fn command_color(command: &str) -> Color {
 }
 
 fn print_output(command: &str, status: i32, output: &str) {
+    if status != 0 { COMMAND_FAILED.store(true, Ordering::Relaxed); }
     let _color = ColorGuard::new(if status == 0 { command_color(command) } else { Color::Red });
     if command != "bfetch" || status != 0 {
         print_str(output);
@@ -228,11 +339,11 @@ fn print_output(command: &str, status: i32, output: &str) {
     }
 }
 
-fn run_program(path: &str) {
+fn run_program(name:&str,args:&[&str]) {
+    let bin=alloc::format!("/bin/{name}");
+    let path=if !name.contains('/')&&fs::VFS.lock().stat(&bin).is_ok(){bin.as_str()}else{name};
     let _color = ColorGuard::new(Color::Green);
-    if !path.ends_with(".bh") {
-        return print_error("run: bOS programs must use the .bh extension");
-    }
+    let detached=args.last()==Some(&"&");let args=if detached{&args[..args.len()-1]}else{args};let mut argv=vec![name];argv.extend_from_slice(args);
     let data = {
         let mut vfs = fs::VFS.lock();
         match vfs.stat(path) {
@@ -245,7 +356,8 @@ fn run_program(path: &str) {
         vfs.read_file(path)
     };
     match data {
-        Ok(data) => match crate::user::run(&data) {
+        Ok(data) if detached||(console::capturing()&&data.get(..5)==Some(b"\x7fELF\x01"))=>match crate::user::jobs::start(&data,&argv){Ok(pid)=>{if detached{print_line(&alloc::format!("[{pid}] {name}"));}else{WINDOW_JOB.store(pid,Ordering::Relaxed);}},Err(e)=>print_error(e)},
+        Ok(data) => match crate::user::run_args(&data,&argv) {
             Ok(0) => {}
             Ok(status) if status > 0 => print_error(&alloc::format!("run: exited with status {}", status)),
             Ok(status) => print_error(&alloc::format!("run: user fault (vector {})", -status - 1)),
@@ -360,6 +472,7 @@ fn run_capture(
         }
         "ifconfig" => crate::drivers::net::ifconfig(args, out),
         "ping" => crate::drivers::net::ping(args, out),
+        "web" => crate::web::command(args, out),
         "bitstat" => {
             emit(out, &alloc::format!("bOS: {}-bit (x86_64)", usize::BITS));
             0
@@ -403,7 +516,14 @@ fn run_capture(
             }
             0
         }
+        "clip" => crate::desktop::clip_command(args,out),
+        "language" | "lang" | "theme" => crate::desktop::preference_command(cmd,args,out),
+        "date" => {emit(out,&crate::desktop::date_string());0},
         "calculator" => calculate(&args.join(" "), out),
+        "ps"|"jobs"=>{out.push_str(&crate::user::jobs::list());0}
+        "kill"=>if args.first().and_then(|v|v.parse().ok()).is_some_and(crate::user::jobs::kill){0}else{emit(out,"kill: no such running job");1},
+        "joblog"=>{if let Some((text,status))=args.first().and_then(|v|v.parse().ok()).and_then(crate::user::jobs::take){out.push_str(&text);if let Some(code)=status{emit(out,&alloc::format!("exit {code}"));}0}else{emit(out,"usage: joblog PID");1}},
+        "sleep"=>{let ms=match args.first().unwrap_or(&"1000").parse::<u32>(){Ok(n)=>n,Err(_)=>{emit(out,"usage: sleep MILLISECONDS");return 1;}};let until=crate::boottime::elapsed_ms()+ms as u64;while crate::boottime::elapsed_ms()<until{crate::user::jobs::poll();crate::drivers::net::poll();if serial::try_read_byte()==Some(3){return 130;}core::hint::spin_loop();}0}
         "echo" => {
             emit(out, &args.join(" "));
             0
@@ -464,6 +584,9 @@ fn run_capture(
                     phys::free_memory() / 4096,
                 ),
             );
+            #[cfg(feature = "live")]
+            emit(out, &alloc::format!("Live kernel + allocated frames, peak {} bytes",
+                crate::live::resident_bytes() + phys::peak_used()));
             0
         }
         "uptime" => {
@@ -499,6 +622,7 @@ fn emit(out: &mut String, s: &str) {
 enum Token {
     Word(String),
     Input,
+    Pipe,
     Output { append: bool },
 }
 
@@ -534,6 +658,10 @@ fn tokenize(line: &str) -> Result<Vec<Token>, &'static str> {
                     toks.push(Token::Word(core::mem::take(&mut cur)));
                     has = false;
                 }
+            }
+            '|' => {
+                if has { toks.push(Token::Word(core::mem::take(&mut cur))); has = false; }
+                toks.push(Token::Pipe);
             }
             '>' => {
                 if has {
@@ -606,6 +734,8 @@ fn split_redir(toks: Vec<Token>) -> Result<(Vec<String>, Redirections), &'static
 
 const COMMANDS: &[(&str, &str)] = &[
     ("help", "help [cmd] — this text or details for one command"),
+    ("exit", "exit — start a fresh bSH session"),
+    ("native", "native — open the minimal ring-3 test shell (exit to return)"),
     ("info", "info — full system info"),
     ("uname", "uname [-a] — system name"),
     ("dmesg", "dmesg [-c] — print or clear the kernel ring buffer"),
@@ -614,7 +744,9 @@ const COMMANDS: &[(&str, &str)] = &[
     ("bitstat", "bitstat — show the kernel bitness"),
     ("bfetch", "bfetch — show a system summary"),
     ("lspci", "lspci — list PCI devices and hardware IDs"),
-    ("ifconfig", "ifconfig [dhcp | static <IPv4/prefix> [gateway]] — configure eth0"),
+    ("ifconfig", "ifconfig [dhcp | static <IPv4/prefix> [gateway [DNS]]] — configure eth0"),
+    ("web", "web <URL> — read an HTTP or HTTPS page"),
+    ("gui", "gui — open the desktop and browser (F12 returns to bSH)"),
     ("ping", "ping <IPv4 address> — send one ICMP echo request"),
     ("calculator", "calculator [expression] — integer arithmetic (+ - * / %)"),
     ("calculator.bh", "calculator.bh — built-in calculator alias"),
@@ -649,6 +781,17 @@ const COMMANDS: &[(&str, &str)] = &[
     ("chmod", "chmod <oct> <path...> — change permission bits"),
     ("find", "find [path] [-name pat] [-type f|d|l] — walk tree"),
     ("mem", "mem — memory stats"),
+    ("clip", "clip [text | -f file | -w file] — shared clipboard"),
+    ("language","language [en|ru] — desktop language"),
+    ("settings","settings — open desktop preferences"),
+    ("ps","ps, jobs — list processes"),
+    ("kill","kill PID — terminate a background process"),
+    ("joblog","joblog PID — read background output and exit status"),
+    ("sleep","sleep [ms] — wait in milliseconds"),
+    ("history","history — display previous commands"),
+    ("theme","theme [dark|light] — desktop theme"),
+    ("date","date — hardware clock"),
+    ("shutdown","shutdown — sync and power off"),
     ("runall", "runall <program.bh> ... — preemptive foreground batch"),
     ("memtest", "memtest — check physical and heap allocators"),
     ("uptime", "uptime — timer ticks and boot time"),
@@ -2048,6 +2191,7 @@ fn print_line(s: &str) {
 }
 
 fn print_error(message: &str) {
+    COMMAND_FAILED.store(true, Ordering::Relaxed);
     let _color = ColorGuard::new(Color::Red);
     print_line(message);
 }

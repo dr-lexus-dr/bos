@@ -3,7 +3,8 @@
 Статические ELF64 работают в ring 3 на BSP. `int 0x80`: номер в rax,
 аргументы rdi/rsi/rdx, результат rax, ошибки отрицательные errno.
 Номера совместимы с прежними бинарниками bOS; это не Linux binary ABI.
-Обычная загрузка запускает native-init как PID 1 и native-shell как его ребёнка.
+Обычная загрузка открывает рабочий стол. Маркер `/system/native` в расширенном initrd запускает нативный PID 1 и bSH, а `/system/nash` выбирает nash. Из графической сессии F12 открывает полноэкранную bSH.
+
 
 | Номер | Вызов | Аргументы / результат |
 | --- | --- | --- |
@@ -77,3 +78,20 @@ Host-набор тестирует именно kernel pipe implementation, вк
 Восстановительная kernel bSH выбирается параметром UEFI `recovery` либо
 файлом `/system/recovery` в initrd. QEMU regression harness добавляет marker
 только в свою временную копию ESP; обычный образ запускает native init.
+
+## ClaudeOS i386 ABI
+
+Статические ELF32 `ET_EXEC` для `EM_386` исполняются в режиме совместимости x86-64, в ring 3 и в отдельных адресных пространствах. Область программы начинается с `0x40000000`. При входе `[esp]` содержит argc, `[esp+4]` — указатель на завершающийся нулём массив argv. Номер вызова передаётся в EAX, аргументы — в EBX, ECX и EDX, результат возвращается в EAX после `int 0x80`.
+
+| EAX | Операция |
+| ---: | --- |
+| 0 | exit(status) |
+| 1, 2 | write(fd, buf, size), read(fd, buf, size) |
+| 3, 4 | open(path), close(fd) |
+| 5 | getpid() |
+| 6, 7 | sleep_ms(ms), ticks_ms() |
+| 8 | sbrk(increment) |
+| 9, 10 | yield(), getkey() |
+| 11 | stat_size(path) |
+
+В `/bin` live-образа доступны hello, primes, guess, counter, wc, spin и crash. Примеры также доступны в `/applications/i386`. Ядро принимает внешние программы с тем же соглашением. Поддержка не распространяется на Linux i386 ABI. [Заголовок и примеры](../userspace/compat32)

@@ -7,6 +7,7 @@
 //! the [`FileSystem`] trait; [`Vfs`] routes by longest-prefix mount match.
 
 pub mod bfs;
+pub mod fat;
 pub mod ramfs;
 
 use alloc::vec::Vec;
@@ -277,6 +278,11 @@ impl Vfs {
         options: &str,
     ) -> Result<(), FileSystemError> {
         let fs_type = if fs_type == "bfs" { "bFS" } else { fs_type };
+        if fs_type == "fat" {
+            if device != crate::drivers::data_disk::name() || self.mounts.iter().any(|m| m.device == device) { return Err(FileSystemError::NoSuchDevice); }
+            let fs = fat::Fat::load(crate::drivers::data_disk::sectors(), false)?;
+            return self.mount_fs(mount_point, device, Box::new(fs), options.split(',').any(|s| s=="ro"));
+        }
         if !self.filesystems.iter().any(|n| n == fs_type) {
             return Err(FileSystemError::NoSuchDevice);
         }
@@ -774,7 +780,7 @@ pub fn init(boot_info: &bloader_shared::BootInfo) -> &'static str {
             return "VFS initialization failed";
         }
         for path in [
-            "/applications",
+            "/applications", "/bin", "/etc", "/media",
             "/system/logs",
             "/system/mounts",
             "/system/tmp",
@@ -784,6 +790,7 @@ pub fn init(boot_info: &bloader_shared::BootInfo) -> &'static str {
             "/users/default/music",
             "/users/default/videos",
         ] {
+            if cfg!(feature="live")&&matches!(path,"/users/default/music"|"/users/default/pictures"|"/users/default/videos"){continue;}
             if let Err(error) = vfs.mkdir_p(path) {
                 info!("VFS: could not create {}: {:?}", path, error);
             }
@@ -805,12 +812,24 @@ pub fn init(boot_info: &bloader_shared::BootInfo) -> &'static str {
         }
     }
 
+    {
+        let mut v=VFS.lock();
+        let _=v.mkdir_p("/applications/i386");
+        macro_rules! install {($($name:literal),*)=>{$({
+            let image=include_bytes!(concat!(env!("OUT_DIR"),"/",$name,".elf"));
+            let path=concat!("/applications/i386/",$name);let _=v.write_file(path,image);
+            if v.lstat(concat!("/bin/",$name)).is_err(){let _=v.symlink(path,concat!("/bin/",$name));}
+            let _=v.symlink(path,concat!("/bin/",$name,".elf"));
+        })*};}
+        install!("hello","primes","guess","counter","wc","spin","crash");
+    }
     let storage = match crate::drivers::data_disk::probe() {
         Ok(Some(sectors)) => {
-            match bfs::BfsFileSystem::load_users_disk(sectors)
-                .and_then(|disk| VFS.lock().mount_fs("/users", crate::drivers::data_disk::name(), Box::new(disk), false))
-            {
-                Ok(()) => match crate::drivers::data_disk::name() { "nvme0" => "/users is persistent on nvme0", "ahci0" => "/users is persistent on ahci0", _ => "/users is persistent on virtio0" },
+            let disk = bfs::BfsFileSystem::load_users_disk(sectors)
+                .map(|v| Box::new(v) as Box<dyn FileSystem>)
+                .or_else(|_| fat::Fat::load(sectors,true).map(|v|Box::new(v) as Box<dyn FileSystem>));
+            match disk.and_then(|v| VFS.lock().mount_fs("/users",crate::drivers::data_disk::name(),v,false)){
+                Ok(()) => match crate::drivers::data_disk::name() { "nvme0" => "/users is persistent on nvme0", "ahci0" => "/users is persistent on ahci0", "ata0" => "/users is persistent on ata0", _ => "/users is persistent on virtio0" },
                 Err(error) => {
                     log::warn!("bFS data disk rejected: {:?}", error);
                     "Data disk rejected; /users is in RAM"
@@ -824,8 +843,11 @@ pub fn init(boot_info: &bloader_shared::BootInfo) -> &'static str {
         }
     };
     if storage.contains("persistent") {
+        let mut vfs=VFS.lock();
+        for path in ["/users/default","/users/default/documents","/users/default/downloads"] {let _=vfs.mkdir_p(path);}
         CRASH_LOG_READY.store(true, Ordering::Release);
     }
+    let _=VFS.lock().symlink("/users/default/.config/desktop.cfg","/etc/gui.cfg");
     info!("VFS initialized");
     storage
 }

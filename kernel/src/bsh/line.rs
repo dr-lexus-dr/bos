@@ -14,6 +14,7 @@ const HISTORY_LIMIT: usize = 64;
 pub(super) struct History(Vec<String>);
 
 impl History {
+    pub fn entries(&self)->&[String]{&self.0}
     pub(super) fn new() -> Self {
         Self(Vec::new())
     }
@@ -30,7 +31,7 @@ impl History {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Key {
+pub(crate) enum Key {
     Text(char),
     Enter,
     Backspace,
@@ -45,6 +46,14 @@ pub(super) enum Key {
     PageUp,
     PageDown,
     Control(u8),
+    Super, AltTab, Escape, Console, Layout, CloseWindow,
+}
+
+pub(crate) fn shift_held() -> bool { INPUT.lock().shifts != 0 }
+
+pub(crate) fn desktop_byte(byte: u8, serial: bool) -> Option<Key> {
+    let mut input = INPUT.lock();
+    if serial { input.serial(byte, true) } else { input.ps2(byte) }
 }
 
 #[derive(Clone, Copy)]
@@ -61,6 +70,8 @@ struct Input {
     extended: bool,
     shifts: u8,
     controls: u8,
+    alt: bool,
+    russian:bool,
     utf8: [u8; 4],
     utf8_length: usize,
     utf8_expected: usize,
@@ -72,6 +83,8 @@ static INPUT: Mutex<Input> = Mutex::new(Input {
     extended: false,
     shifts: 0,
     controls: 0,
+    alt: false,
+    russian:false,
     utf8: [0; 4],
     utf8_length: 0,
     utf8_expected: 0,
@@ -81,22 +94,37 @@ pub(super) fn key() -> Key {
     INPUT.lock().next_key(true)
 }
 
+static NATIVE_ESCAPE: Mutex<([u8; 4], usize, usize)> = Mutex::new(([0; 4], 0, 0));
+
 /// Nonblocking PS/2 adapter for the native console. The recovery editor keeps
 /// ownership of the same decoder whenever it is active.
 pub(super) fn native_keyboard_byte() -> Option<u8> {
-    let mut input=INPUT.try_lock()?;
-    let key=input.ps2(keyboard::try_read()?)?;
-    match key {
-        Key::Text(ch) if ch.is_ascii()=>Some(ch as u8),
-        Key::Enter=>Some(b'\r'), Key::Backspace=>Some(127), Key::Tab=>Some(b'\t'),
-        Key::Control(ch)=>Some(ch-b'a'+1),
-        _=>None,
+    let mut pending = NATIVE_ESCAPE.try_lock()?;
+    if pending.2 < pending.1 {
+        let byte = pending.0[pending.2];
+        pending.2 += 1;
+        return Some(byte);
     }
+    let mut input = INPUT.try_lock()?;
+    let key = input.ps2(keyboard::try_read()?)?;
+    let sequence: &[u8] = match key {
+        Key::Text(ch) if ch.is_ascii() => return Some(ch as u8),
+        Key::Enter => return Some(b'\r'), Key::Backspace => return Some(127), Key::Tab => return Some(b'\t'),
+        Key::Control(ch) => return Some(ch-b'a'+1),
+        Key::Up => b"\x1b[A", Key::Down => b"\x1b[B", Key::Right => b"\x1b[C", Key::Left => b"\x1b[D",
+        Key::Home => b"\x1b[H", Key::End => b"\x1b[F", Key::Delete => b"\x1b[3~",
+        _ => return None,
+    };
+    pending.0[..sequence.len()].copy_from_slice(sequence);
+    pending.1 = sequence.len();
+    pending.2 = 1;
+    Some(sequence[0])
 }
 
 impl Input {
     fn next_key(&mut self, unicode: bool) -> Key {
         loop {
+            crate::user::jobs::poll();
             crate::drivers::net::poll();
             if let Some(byte) = serial::try_read_byte() {
                 if let Some(key) = self.serial(byte, unicode) {
@@ -105,7 +133,8 @@ impl Input {
             }
             if let Some(scancode) = keyboard::try_read() {
                 if let Some(key) = self.ps2(scancode) {
-                    return key;
+                    if key==Key::Layout{self.russian=!self.russian;continue;}
+                    return if self.russian{crate::desktop::russian_key(key)}else{key};
                 }
             }
             core::hint::spin_loop();
@@ -214,6 +243,9 @@ impl Input {
                     self.controls &= !2;
                     None
                 }
+                0x5b | 0x5c => Some(Key::Super),
+                0x38 => { self.alt = true; None },
+                0xb8 => { self.alt = false; None },
                 0x47 => Some(Key::Home),
                 0x4f => Some(Key::End),
                 0x49 => Some(Key::PageUp),
@@ -228,6 +260,13 @@ impl Input {
             };
         }
         match code {
+            0x01 => return Some(Key::Escape),
+            0x58 => return Some(Key::Console),
+            0x38 => self.alt=true,
+            0xb8 => self.alt=false,
+            0x39 if self.controls!=0 => return Some(Key::Layout),
+            0x3e if self.alt=>return Some(Key::CloseWindow),
+            0x0f if self.alt => return Some(Key::AltTab),
             0x1d => self.controls |= 1,
             0x9d => self.controls &= !1,
             0x2a => self.shifts |= 1,
@@ -275,30 +314,29 @@ pub(super) fn read(prompt: &str, history: Option<&History>) -> String {
 
     loop {
         console::toggle_input_cursor();
-        let key = input.next_key(false);
+        let key = input.next_key(true);
         console::toggle_input_cursor();
         match key {
+            Key::Console if history.is_some()=>{print_str("\r\n");return String::from("gui");}
             Key::Enter => {
                 print_str(&line[cursor..]);
                 print_str("\r\n");
                 return line;
             }
-            Key::Left if cursor > 0 => {
+            Key::Left | Key::Control(b'b') if cursor > 0 => {
                 back(1);
-                cursor -= 1;
+                cursor=line[..cursor].char_indices().next_back().unwrap().0;
             }
-            Key::Right if cursor < line.len() => {
-                print_str(&line[cursor..cursor + 1]);
-                cursor += 1;
+            Key::Right | Key::Control(b'f') if cursor < line.len() => {
+                let next=cursor+line[cursor..].chars().next().unwrap().len_utf8();print_str(&line[cursor..next]);cursor=next;
             }
-            Key::Text(ch) if line.len() < MAX_LINE => {
+            Key::Text(ch) if line.len()+ch.len_utf8()<=MAX_LINE => {
                 line.insert(cursor, ch);
-                redraw_tail(&line, cursor, cursor + 1, 0);
-                cursor += 1;
+                redraw_tail(&line,cursor,cursor+ch.len_utf8(),0);cursor+=ch.len_utf8();
             }
             Key::Backspace if cursor > 0 => {
                 back(1);
-                cursor -= 1;
+                cursor=line[..cursor].char_indices().next_back().unwrap().0;
                 line.remove(cursor);
                 redraw_tail(&line, cursor, cursor, 1);
             }
@@ -306,25 +344,41 @@ pub(super) fn read(prompt: &str, history: Option<&History>) -> String {
                 line.remove(cursor);
                 redraw_tail(&line, cursor, cursor, 1);
             }
+            Key::Home | Key::Control(b'a') => { back(line[..cursor].chars().count()); cursor = 0; }
+            Key::End | Key::Control(b'e') => { print_str(&line[cursor..]); cursor = line.len(); }
+            Key::Control(b'u') => {
+                let replacement = String::from(&line[cursor..]);
+                replace(&mut line, &mut cursor, &replacement, 0);
+            }
+            Key::Control(b'k') => {
+                let replacement = String::from(&line[..cursor]);
+                let next = cursor;
+                replace(&mut line, &mut cursor, &replacement, next);
+            }
+            Key::Control(b'w') => {
+                let mut start = cursor;
+                while start > 0 && line.as_bytes()[start-1].is_ascii_whitespace() { start -= 1; }
+                while start > 0 && !line.as_bytes()[start-1].is_ascii_whitespace() { start -= 1; }
+                let replacement = alloc::format!("{}{}", &line[..start], &line[cursor..]);
+                replace(&mut line, &mut cursor, &replacement, start);
+            }
+            Key::Control(b'c') => { print_str("^C\r\n"); return String::new(); }
+            Key::Control(b'v')=>{let mut text=String::new();for ch in crate::desktop::clipboard().chars().filter(|ch|!ch.is_control()){if line.len()+text.len()+ch.len_utf8()>MAX_LINE{break;}text.push(ch);}line.insert_str(cursor,&text);redraw_tail(&line,cursor,cursor+text.len(),0);cursor+=text.len();}
+
             Key::Up if position > 0 => {
-                if position == commands.len() {
-                    draft = (line.clone(), cursor);
+                if position == commands.len() { draft = (line.clone(), cursor); }
+                let prefix = &draft.0[..draft.1];
+                if let Some(next) = (0..position).rev().find(|i| commands[*i].starts_with(prefix)) {
+                    position = next;
+                    replace(&mut line, &mut cursor, &commands[position], commands[position].len());
                 }
-                position -= 1;
-                replace(
-                    &mut line,
-                    &mut cursor,
-                    &commands[position],
-                    commands[position].len(),
-                );
             }
             Key::Down if position < commands.len() => {
-                position += 1;
+                let prefix = &draft.0[..draft.1];
+                position = (position+1..commands.len()).find(|i| commands[*i].starts_with(prefix)).unwrap_or(commands.len());
                 let (next, next_cursor) = if let Some(command) = commands.get(position) {
                     (command.as_str(), command.len())
-                } else {
-                    (draft.0.as_str(), draft.1)
-                };
+                } else { (draft.0.as_str(), draft.1) };
                 replace(&mut line, &mut cursor, next, next_cursor);
             }
             Key::Tab if history.is_some() => complete(prompt, &mut line, &mut cursor),
@@ -349,12 +403,12 @@ fn redraw_tail(line: &str, start: usize, cursor: usize, erase: usize) {
     for _ in 0..erase {
         print_str(" ");
     }
-    back(line.len() - cursor + erase);
+    back(line[cursor..].chars().count()+erase);
 }
 
 fn replace(line: &mut String, cursor: &mut usize, replacement: &str, next: usize) {
-    let erase = line.len().saturating_sub(replacement.len());
-    back(*cursor);
+    let erase=line.chars().count().saturating_sub(replacement.chars().count());
+    back(line[..*cursor].chars().count());
     redraw_tail(replacement, 0, next, erase);
     line.clear();
     line.push_str(replacement);
@@ -362,7 +416,7 @@ fn replace(line: &mut String, cursor: &mut usize, replacement: &str, next: usize
 }
 
 fn separator(ch: char) -> bool {
-    matches!(ch, ' ' | '\t' | '<' | '>')
+    matches!(ch, ' ' | '\t' | '<' | '>' | '|')
 }
 
 /// Return the raw word's start and its decoded prefix, including unfinished quotes.
@@ -395,7 +449,7 @@ fn word_prefix(line: &str) -> Option<(usize, String)> {
     (!escaped).then_some((start, word))
 }
 
-fn complete(prompt: &str, line: &mut String, cursor: &mut usize) {
+pub(crate) fn complete(prompt: &str, line: &mut String, cursor: &mut usize) {
     if line[*cursor..]
         .chars()
         .next()
@@ -406,7 +460,7 @@ fn complete(prompt: &str, line: &mut String, cursor: &mut usize) {
     let Some((start, word)) = word_prefix(&line[..*cursor]) else {
         return;
     };
-    let mut matches: Vec<String> = if line[..start].trim().is_empty() && !word.contains('/') {
+    let mut matches: Vec<String> = if (line[..start].trim().is_empty() || line[..start].trim_end().ends_with('|')) && !word.contains('/') {
         COMMANDS
             .iter()
             .map(|(command, _)| *command)

@@ -3,6 +3,9 @@ extern crate alloc;
 fn input_byte() -> Option<u8> {
     None
 }
+mod linux {
+    pub fn random_bytes(_: &mut [u8]) -> Result<(), i64> { Err(-38) }
+}
 mod syscall {
     pub fn fs_err(_: ()) -> u64 {
         (-9i64) as u64

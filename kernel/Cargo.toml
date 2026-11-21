@@ -1,6 +1,6 @@
 [package]
 name = "bos_kernel"
-version = "0.6.0"
+version = "1.0.0"
 edition = "2021"
 description = "bOS Kernel - Protected mode Rust kernel"
 
@@ -9,7 +9,15 @@ bloader_shared = { path = "../bloader_shared" }
 x86_64 = "0.15"
 volatile = "0.4"
 spin = "0.9"
-smoltcp = { version = "=0.12.0", default-features = false, features = ["alloc", "medium-ethernet", "proto-ipv4", "socket-dhcpv4", "socket-icmp"] }
+smoltcp = { version = "=0.12.0", default-features = false, features = ["alloc", "medium-ethernet", "proto-ipv4", "socket-dhcpv4", "socket-icmp", "socket-dns", "socket-tcp"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "tls12"] }
+ring = { version = "0.17", default-features = false, features = ["less-safe-getrandom-custom-or-rdrand"] }
+getrandom = { version = "0.2", features = ["rdrand"] }
+webpki-roots = "1"
+zune-jpeg = { version = "=0.4.21", default-features = false }
+fatfs = { package = "starry-fatfs", version = "=0.4.1-preview.2", default-features = false, features = ["alloc", "lfn", "unicode"] }
+bos_web_runtime = { path = "web-runtime" }
+miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
 bitflags = "2.0"
 lazy_static = { version = "1.4", features = ["spin_no_std"] }
 log = "0.4"
@@ -17,8 +25,13 @@ uuid = { version = "=1.6.0", default-features = false }
 
 [features]
 default = []
+live = []
 smp = []
 acpi = []
+
+[build-dependencies]
+cc = "1"
+serde_json = "1"
 
 [profile.release]
 lto = true

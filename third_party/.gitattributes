@@ -1,0 +1,4 @@
+# Preserve upstream source and the literal context lines required by patch.
+lzma/*.h -whitespace
+lzma/*.c -whitespace
+patches/*.patch -whitespace

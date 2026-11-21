@@ -105,16 +105,19 @@ def _boot(esp, disk=None, *, nic="e1000", memory=None, label=None, log=True, pro
 
 @contextmanager
 def boot(esp, disk=None, *, nic="e1000", memory=None, label=None, log=True,
-         recovery=True, prompt=PROMPT):
-    """Old regression suites explicitly boot the recovery shell in a private ESP."""
+         recovery=True, prompt=PROMPT, native=None, profile=None):
+    """Boot a private ESP with the requested shell profile."""
     with tempfile.TemporaryDirectory(prefix="bos-boot-") as directory:
         stage=Path(directory)
         target=stage/"esp"
         shutil.copytree(Path(esp)/"EFI",target/"EFI")
-        if recovery:
+        if native is None:
+            native = not recovery
+        marker = profile or ("recovery" if recovery else "native" if native else "bsh")
+        if marker:
             (stage/"system").mkdir()
-            (stage/"system/recovery").write_text("QEMU recovery regression suite\n")
+            (stage/"system"/marker).write_text("Explicit QEMU test boot mode\n")
             subprocess.run(["tar","-rf",str(target/"EFI/bOS/initrd.img"),
-                            "-C",str(stage),"system/recovery"],check=True)
+                            "-C",str(stage),"system/"+marker],check=True)
         with _boot(target,disk,nic=nic,memory=memory,label=label,log=log,prompt=prompt) as result:
             yield result

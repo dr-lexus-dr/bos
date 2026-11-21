@@ -149,7 +149,7 @@ def check_babo(shell):
 
 
 def check_native_boot():
-    prompt=b"bSH> "
+    prompt=b"bSH ~ % "
     with boot(ROOT/"target/esp",recovery=False,prompt=prompt,label="native-pid1") as (shell,output):
         assert b"init: PID 1 in ring 3" in output, output
         shell.command("/applications/process-test.bh",b"PROCESS PIPE TEST PASSED",prompt=prompt)
@@ -170,12 +170,12 @@ def main():
         disk = work / "users.img"
         subprocess.run([ROOT / "target/release/mkusers", disk], check=True)
         # Native fsync must persist data through a power cycle, on either transport.
-        with boot(esp,disk,recovery=False,prompt=b"bSH> ",label="native-disk-write") as (shell,output):
+        with boot(esp,disk,recovery=False,prompt=b"bSH ~ % ",label="native-disk-write") as (shell,output):
             assert PERSISTENT in output
-            shell.command("/applications/native-demo.bh",b"libbos native test passed",prompt=b"bSH> ")
-        with boot(esp,disk,recovery=False,prompt=b"bSH> ",label="native-disk-read") as (shell,output):
+            shell.command("/applications/native-demo.bh",b"libbos native test passed",prompt=b"bSH ~ % ")
+        with boot(esp,disk,recovery=False,prompt=b"bSH ~ % ",label="native-disk-read") as (shell,output):
             assert PERSISTENT in output
-            shell.command("cat /users/default/documents/native.txt",b"native Rust file I/O",prompt=b"bSH> ")
+            shell.command("cat /users/default/documents/native.txt",b"native Rust file I/O",prompt=b"bSH ~ % ")
 
         with boot(esp, label="boot-ram") as (shell, output):
             assert b"No data disk; /users is in RAM" in output

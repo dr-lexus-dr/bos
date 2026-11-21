@@ -17,6 +17,14 @@ _start:
      * own page tables are about to replace UEFI's — a timer IRQ in between
      * would vector into UEFI handlers with an address space they don't know. */
     cli
+    /* ring uses baseline x86-64 SSE2 for authenticated web connections. */
+    mov %cr0, %rax
+    and $-13, %rax
+    or $2, %rax
+    mov %rax, %cr0
+    mov %cr4, %rax
+    or $0x600, %rax
+    mov %rax, %cr4
 
     /* Save boot info pointer */
     mov %rdi, %rbx
@@ -106,7 +114,7 @@ _start_ap:
 .global early_stack_bottom
 .global early_stack_top
 early_stack_bottom:
-    .skip 65536  /* 64 KB early stack: debug builds have fat frames and
+    .skip 524288 /* 512 KB early stack: debug builds have fat frames and
                   * deep format/panic chains; 16 KB overflowed into the
                   * .bss statics living just below (lock bytes, Once state) */
 early_stack_top:

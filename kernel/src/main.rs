@@ -12,7 +12,7 @@
 
 extern crate alloc;
 
-use core::{arch::global_asm, panic::PanicInfo, sync::atomic::{AtomicBool, Ordering}};
+use core::{panic::PanicInfo, sync::atomic::{AtomicBool, Ordering}};
 use alloc::{vec::Vec, string::String, format, boxed::Box, sync::Arc};
 use log::{info, warn, error, debug, trace, LevelFilter};
 use bloader_shared::{BootInfo, KernelEntryFn, KERNEL_MAGIC, BOOT_PROTOCOL_VERSION};
@@ -31,6 +31,10 @@ mod bsh;
 mod user;
 mod logger;
 mod boottime;
+mod web;
+mod desktop;
+#[cfg(feature = "live")]
+mod live;
 
 use arch::x86_64::{gdt, idt, pic, apic, cpu, paging, serial};
 use init::kernel_main;
@@ -44,7 +48,7 @@ pub extern "sysv64" fn _start_rust(boot_info: &'static BootInfo) -> ! {
     boottime::init();
 
     // Early initialization - before memory management
-    early_init(boot_info);
+    early_init(boot_info, &boot_info.memory_map);
 
     // Initialize kernel subsystems
     kernel_init(boot_info);
@@ -53,7 +57,7 @@ pub extern "sysv64" fn _start_rust(boot_info: &'static BootInfo) -> ! {
     kernel_main(boot_info)
 }
 
-fn early_init(boot_info: &'static BootInfo) {
+fn early_init(boot_info: &BootInfo, memory_map: &[bloader_shared::MemoryRegion]) {
     // Verify boot info magic
     assert_eq!(boot_info.magic, bloader_shared::BLOADER_MAGIC, "Invalid boot info magic");
     assert_eq!(boot_info.version, BOOT_PROTOCOL_VERSION, "Unsupported boot protocol version");
@@ -84,12 +88,12 @@ fn early_init(boot_info: &'static BootInfo) {
     info!("PIC initialized");
 
     // Initialize physical memory manager
-    mm::phys::init(&boot_info.memory_map);
+    mm::phys::init(memory_map);
     info!("Physical memory manager initialized");
 
     // Initialize virtual memory manager (must precede APIC: apic::init
     // uses map_to, which needs KERNEL_PML4/PHYS_MEM_OFFSET from here)
-    paging::init(&boot_info.memory_map);
+    paging::init(memory_map);
     info!("Virtual memory manager initialized");
 
     // Initialize APIC (needs map_to for MMIO mapping)
@@ -104,7 +108,7 @@ fn early_init(boot_info: &'static BootInfo) {
     );
 }
 
-fn kernel_init(_boot_info: &'static BootInfo) {
+fn kernel_init(_boot_info: &BootInfo) {
     info!("Initializing kernel subsystems...");
 
     // Initialize heap allocator
@@ -172,7 +176,8 @@ fn alloc_error(layout: core::alloc::Layout) -> ! {
 }
 
 // Assembly entry point
-global_asm!(include_str!("arch/x86_64/entry.asm"));
+#[cfg(not(feature = "live"))]
+core::arch::global_asm!(include_str!("arch/x86_64/entry.asm"));
 
 // Kernel header for bootloader
 #[used]

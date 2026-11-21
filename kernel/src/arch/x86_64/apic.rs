@@ -246,6 +246,8 @@ pub fn set_timer_periodic(ticks: u32) {
     }
 }
 
+pub fn active_period()->Option<u32>{unsafe{let lvt=read_reg(APIC_TIMER_LVT);if lvt & (TIMER_PERIODIC|LVT_MASK)==TIMER_PERIODIC{Some(read_reg(APIC_TIMER_INIT_COUNT))}else{None}}}
+
 /// Stop timer
 pub fn stop_timer() {
     unsafe { write_reg(APIC_TIMER_LVT, LVT_MASK); }

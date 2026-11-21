@@ -8,6 +8,7 @@ members = [
     "bloader_shared",
     "bootloader",
     "kernel",
+    "kernel/web-runtime",
     "fs/bfs",
     "userspace/init",
     "userspace/shell",
@@ -21,9 +22,10 @@ members = [
     "drivers/net",
     "drivers/fs",
     "utils/logger",
+    "utils/browser-instrument",
     "utils/config",
 ]
-exclude = []
+exclude = ["target/upstream/nash", "target/upstream/coreutils"]
 
 [workspace.dependencies]
 # Core
@@ -77,3 +79,8 @@ strip = true
 
 [profile.dev]
 debug = true
+
+[profile.live]
+inherits = "release"
+opt-level = 3
+strip = false

@@ -55,9 +55,9 @@ def main():
             shell.command("dmesg", b"=== bOS Kernel Starting ===")
             shell.command("halt", prompt=b"halted.\r\n")
         with boot(esp, memory=memory, label=f"native-matrix-{memory}",
-                  recovery=False, prompt=b"bSH> ") as (shell, output):
+                  recovery=False, prompt=b"bSH ~ % ") as (shell, output):
             assert b"init: PID 1 in ring 3" in output
-            shell.command("/applications/process-test.bh", b"PROCESS PIPE TEST PASSED", prompt=b"bSH> ")
+            shell.command("/applications/process-test.bh", b"PROCESS PIPE TEST PASSED", prompt=b"bSH ~ % ")
         print(f"{memory}: recovery diagnostics and native processes passed", flush=True)
 
 

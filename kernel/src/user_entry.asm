@@ -14,31 +14,17 @@ enter_user:
     push %r15
     mov %rsp, saved_user_return_stack(%rip)
 
-    push ${user_ds}
-    push %rsi
-    push $0x202
-    push ${user_cs}
-    push %rdi
-    xor %eax, %eax
-    xor %ebx, %ebx
-    xor %ecx, %ecx
-    xor %edx, %edx
-    xor %esi, %esi
-    xor %edi, %edi
-    xor %ebp, %ebp
-    xor %r8d, %r8d
-    xor %r9d, %r9d
-    xor %r10d, %r10d
-    xor %r11d, %r11d
-    xor %r12d, %r12d
-    xor %r13d, %r13d
-    xor %r14d, %r14d
-    xor %r15d, %r15d
-    iretq
+    mov ${user_ds}, %ax
+    mov %ax, %ds
+    mov %ax, %es
+    jmp resume_user
 
 .global leave_user
 leave_user:
     cld
+    mov $16, %ax
+    mov %ax, %ds
+    mov %ax, %es
     mov %rdi, %rax
     mov saved_user_return_stack(%rip), %rsp
     pop %r15
@@ -114,3 +100,23 @@ resume_user:
     pop %rbx
     pop %rax
     iretq
+
+# BSP-only SYSCALL entry. FMASK disables IRQs before touching shared scratch.
+.section .bss
+.balign 16
+linux_trap_stack:
+    .skip {trap_bytes}
+linux_trap_top:
+linux_user_rsp:
+    .quad 0
+.section .text
+.global linux_syscall
+linux_syscall:
+    mov %rsp, linux_user_rsp(%rip)
+    lea linux_trap_top(%rip), %rsp
+    push ${user_ds}
+    push linux_user_rsp(%rip)
+    push %r11
+    push ${user_cs}
+    push %rcx
+    jmp user_syscall

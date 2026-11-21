@@ -40,7 +40,11 @@ pub fn disable_interrupts() {
 
 /// Short PC-speaker beep (PIT channel 2). Works with interrupts off;
 /// used as proof-of-life where no console is visible yet.
-pub fn speaker_beep(freq_hz: u32, ms: u32) {
+static SOUND:core::sync::atomic::AtomicBool=core::sync::atomic::AtomicBool::new(true);
+pub fn sound_enabled()->bool{SOUND.load(core::sync::atomic::Ordering::Relaxed)}
+pub fn toggle_sound()->bool{!SOUND.fetch_xor(true,core::sync::atomic::Ordering::Relaxed)}
+pub fn speaker_beep(freq_hz:u32,ms:u32){
+    if !sound_enabled(){return;}
     use x86_64::instructions::port::Port;
     let div = (1193182 / freq_hz.max(1)).clamp(1, 65535) as u16;
     unsafe {

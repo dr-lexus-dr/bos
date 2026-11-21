@@ -209,8 +209,8 @@ pub struct HeapStats {
 
 /// Initialize kernel heap
 pub fn init() {
-    // Start with 16 MB heap
-    const INITIAL_HEAP_SIZE: usize = 16 * 1024 * 1024;
+    // The live profile grows on demand from a few pages.
+    const INITIAL_HEAP_SIZE: usize = if cfg!(feature = "live") { 64 * 1024 } else { 16 * 1024 * 1024 };
 
     // Reserve virtual address space for heap
     let heap_start = KERNEL_HEAP_BASE as usize;
@@ -231,8 +231,8 @@ pub fn init() {
 
     HEAP_ALLOCATOR.lock().init(heap_start, INITIAL_HEAP_SIZE);
     info!(
-        "Kernel heap initialized: {} MB at 0x{:x}",
-        INITIAL_HEAP_SIZE / 1024 / 1024,
+        "Kernel heap initialized: {} KiB at 0x{:x}",
+        INITIAL_HEAP_SIZE / 1024,
         heap_start
     );
 }

@@ -5,9 +5,9 @@ use spin::Mutex;
 pub struct Pipe {
     bytes: [u8; 4096],
     head: usize,
-    length: usize,
+    pub(super) length: usize,
     readers: usize,
-    writers: usize,
+    pub(super) writers: usize,
 }
 impl Pipe {
     pub fn pair() -> (Arc<Handle>, Arc<Handle>) {
@@ -26,6 +26,9 @@ impl Pipe {
 }
 pub enum Handle {
     ConsoleRead,
+    Directory,
+    Null,
+    Random,
     ConsoleWrite,
     File(u32),
     PipeRead(Arc<Mutex<Pipe>>),
@@ -34,6 +37,8 @@ pub enum Handle {
 impl Handle {
     pub fn read(&self, bytes: &mut [u8]) -> Result<usize, i64> {
         match self {
+            Self::Null => Ok(0),
+            Self::Random => { super::linux::random_bytes(bytes)?; Ok(bytes.len()) },
             Self::File(fd) => crate::fs::VFS
                 .lock()
                 .read(*fd, bytes)
@@ -70,6 +75,7 @@ impl Handle {
     }
     pub fn write(&self, bytes: &[u8]) -> Result<usize, i64> {
         match self {
+            Self::Null | Self::Random => Ok(bytes.len()),
             Self::File(fd) => crate::fs::VFS
                 .lock()
                 .write(*fd, bytes)

@@ -15,6 +15,12 @@ for module in free_list; do
     "target/host-tests/$module"
 done
 
+rustc --edition=2021 --test userspace/native-demo/src/shell_line.rs -o target/host-tests/shell-line
+target/host-tests/shell-line
+
+rustc --edition=2021 --test tests/web-reader.rs -o target/host-tests/web-reader
+target/host-tests/web-reader
+
 exec cargo test --locked \
     -p bos-ipc-tests \
     -p libbos \

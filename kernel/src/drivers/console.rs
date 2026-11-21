@@ -113,6 +113,16 @@ pub fn is_fb_on() -> bool {
     FB_ON.load(Ordering::SeqCst) != 0
 }
 
+pub fn framebuffer() -> Option<FramebufferInfo> {
+    if !is_fb_on() { return None; }
+    let fb = FB.lock();
+    Some(FramebufferInfo {
+        base_addr: fb.base, width: fb.width, height: fb.height, stride: fb.stride,
+        pixel_format: if fb.fmt == FMT_RGB { PixelFormat::RGB } else { PixelFormat::BGR },
+        bits_per_pixel: 32,
+    })
+}
+
 pub fn resolution() -> Option<(u32, u32)> {
     if !is_fb_on() {
         return None;
@@ -167,7 +177,18 @@ pub fn print_colored(text: &str, color: Color) {
     print(text);
 }
 
+static WINDOW_OUTPUT: Mutex<Option<alloc::string::String>> = Mutex::new(None);
+pub fn capturing()->bool{WINDOW_OUTPUT.lock().is_some()}
+pub fn capture(f: impl FnOnce()) -> alloc::string::String {
+    let previous=WINDOW_OUTPUT.lock().replace(alloc::string::String::new());
+    f();
+    core::mem::replace(&mut *WINDOW_OUTPUT.lock(),previous).unwrap_or_default()
+}
 pub fn print(s: &str) {
+    if let Some(text) = WINDOW_OUTPUT.lock().as_mut() {
+        if text.len() + s.len() < 256 * 1024 { text.push_str(s); }
+        return;
+    }
     crate::arch::x86_64::serial::write_str(s);
     if !is_fb_on() {
         return;
@@ -349,9 +370,7 @@ fn putc(fb: &mut Fb, ch: char) {
         _ => {
             let g = if (' '..='~').contains(&ch) {
                 ch as u8
-            } else {
-                b'?'
-            };
+            } else if ch=='Ё'{128}else if ch=='ё'{129}else if ('А'..='я').contains(&ch){(ch as u32-0x410+130)as u8}else{b'?'};
             if fb.x >= cols {
                 fb.x = 0;
                 fb.y += 1;
@@ -371,7 +390,8 @@ fn putc(fb: &mut Fb, ch: char) {
 }
 
 fn draw_glyph(fb: &Fb, g: u8) {
-    let glyph = &super::font8x16::FONT[g as usize];
+    const TERMINUS:&[u8]=include_bytes!("../desktop/font.bin");
+    let glyph:&[u8]=if g>=128{&TERMINUS[g as usize*16..g as usize*16+16]}else{&super::font8x16::FONT[g as usize]};
     let base = fb.base as *mut u32;
     let fg = fb.pixel(fb.fg);
     let bg = fb.pixel(fb.bg);

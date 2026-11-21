@@ -1,0 +1,7 @@
+#!/bin/nash
+printf '\033[96m   bOS\033[0m   %s@%s\n' "${USER:-default}" "$(uname -n)"
+printf '         OS:     %s %s\n' "$(uname -s)" "$(uname -r)"
+printf '         Arch:   %s\n' "$(uname -m)"
+printf '         Shell:  nash\n'
+printf '         Home:   %s\n' "$HOME"
+printf '         Tools:  uutils coreutils\n'

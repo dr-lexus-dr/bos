@@ -1,322 +1,95 @@
-# bOS
+# bOS 1.0
 
-**bSH · bFS · bPT**
+[Download the Live disk](https://github.com/dr-lexus-dr/bOS/releases/download/v1.0.0/bOS-1.0.0-x86_64.img) · [Release and SHA256SUMS](https://github.com/dr-lexus-dr/bOS/releases/tag/v1.0.0) · [Русский](README.ru.md)
 
-> Рабочая копия после v0.6.0 загружается в нативные PID 1 и bSH (ring 3).
-> Работают spawn/wait, блокирующие pipes, `cat FILE | wc -c`, fsync и
-> постоянный bFS-диск через VirtIO или AHCI в QEMU. Для прежней полной
-> kernel-консоли соберите с `bash scripts/build.sh --release --recovery`.
-> [Точный статус](docs/STATUS.md), [план](docs/ROADMAP.md), [ABI](docs/abi.md).
-> Это промежуточная сборка, не готовый релиз bOS 1.0.
+bOS is a bootable desktop operating system for x86-64 with its own Rust kernel. One USB image boots through BIOS or UEFI. It opens Files and Browser on an English desktop. The window manager, shell, network stack and web engine all run on the machine that boots the disk.
 
+![The bOS desktop with Files, Browser and the application dock](docs/screenshots/desktop-en.png)
 
-*Boot to a shell. Work with files. Manage GitHub packages with bPT.*
+## Start a live session
 
-*Загрузитесь в оболочку. Работайте с файлами. Управляйте пакетами GitHub через bPT.*
+Download the image and `SHA256SUMS` into the same directory and run `sha256sum -c SHA256SUMS`. Write the image to a USB stick in raw-image mode and choose the stick in the firmware boot menu. Writing the image replaces the contents of the chosen stick. A live session can use a read-only boot medium.
 
-[English](#english) · [Русский](#русский) · [How to install / Установка](docs/INSTALL.md) · [Status / Статус](docs/STATUS.md) · [Changelog](CHANGELOG.md)
-
-## English
-
-**bOS is a small, terminal-first operating system for x86-64 UEFI.** Boot straight into bSH, explore the filesystem, edit a note, or mount a bFS volume. The Rust kernel runs without the standard library, and a fresh session starts in `/users/default` with three directories at the root: `/system`, `/users`, and `/applications`.
-
-bOS 0.2.0 can save `/users` to a dedicated bFS disk in QEMU and run a static ELF64 program in user mode. Live sessions without a data disk use RAM. The Linux tools ship as separate programs.
-
-bOS 0.3.0 adds ANSI foreground and background colors to the framebuffer console. Use `lspci` to see the PCI IDs of devices detected by bOS.
-
-bOS 0.4.0 adds DHCPv4 and `ping` on the Intel 82540EM. bOS 0.5.0 adds Intel 82574L, Realtek RTL8139 and manual IPv4 configuration. bOS 0.6.0 adds the M0 reliability baseline: `dmesg`, boot timing, a best-effort crash log, a 64 GiB frame bitmap, repeated QEMU RAM tests, and CI. See the [status matrix](docs/STATUS.md) and [changelog](CHANGELOG.md).
-
-### Boot diagnostics
-
-```text
-dmesg          # kernel log ring (64 KiB)
-dmesg -c       # print and clear the ring
-bootstat       # boot time, TSC frequency, log size
-uptime         # timer ticks and milliseconds since kernel entry
-crashlog       # read a panic persisted by the previous boot
-crashlog -c    # clear it
-```
-
-A crash log is written only after `/users` is mounted. Writing uses a
-non-blocking VFS lock, so a panic while the filesystem is busy may be reported
-on the serial console but not persisted. The current limits are listed in
-[STATUS.md](docs/STATUS.md).
-
-### Ethernet in bSH
-
-```text
-lspci
-ifconfig
-ping 10.0.2.2
-ifconfig static 10.0.2.15/24 10.0.2.2
-ifconfig dhcp
-```
-
-The example uses addresses from QEMU's default virtual network. bOS selects one supported Ethernet controller as `eth0` and starts DHCP at boot. Manual settings apply to the current session. Use `BOS_NIC=e1000e` or `BOS_NIC=rtl8139` with `scripts/run-qemu.sh` to try another model.
-
-| Controller | PCI ID | Verified in |
-| --- | --- | --- |
-| Intel 82540EM | `8086:100e` | QEMU `e1000` |
-| Intel 82574L | `8086:10d3` | QEMU `e1000e` |
-| Realtek RTL8139 | `10ec:8139` | QEMU `rtl8139` |
-
-Physical cards still need validation. RTL8168/8111 and Wi-Fi require separate drivers.
-
-### Build and run
-
-On Linux, install Rust via rustup, GNU tar, GNU binutils, QEMU x86-64, and OVMF. To build ISO images, also install Python 3 with `pycdlib`, `dosfstools`, and `mtools`. The Rust version and targets come from `rust-toolchain.toml`.
+On Linux with QEMU and KVM, the downloaded image can also run directly from a file.
 
 ```sh
-bash scripts/build.sh --release
-bash scripts/run-qemu.sh
+qemu-system-x86_64 -machine pc -accel kvm -cpu host -smp 1 -m 1G \
+  -device VGA,vgamem_mb=8 \
+  -drive if=none,id=stick,format=raw,readonly=on,file=bOS-1.0.0-x86_64.img \
+  -device qemu-xhci -device usb-storage,drive=stick,bootindex=1 \
+  -netdev user,id=lan -device rtl8139,netdev=lan,romfile=
 ```
 
-The launcher defaults to 1 GiB and `-cpu max`. Set `BOS_MEMORY` (for example, `4G`) to change RAM or `OVMF_CODE` if the firmware is installed at a different path. For the ISO images, use the same build output:
+For software emulation, replace `-accel kvm -cpu host` with `-accel tcg -cpu max,vendor=GenuineIntel`. Allow **1 GiB of guest RAM** for browsing. The image is about **17.5 MB**. On a PC, bOS uses a 32-bit VBE or GOP framebuffer, PS/2 keyboard and mouse input, and wired Ethernet. Supported NICs are Realtek RTL8139, Intel 82540EM and Intel 82574L. The tested firmware configurations are SeaBIOS and OVMF in QEMU. [Measurements and hardware coverage](CONSTRAINTS.md)
 
-```sh
-python3 scripts/mkiso.py
-python3 scripts/mkiso.py --install
-bash scripts/release.sh   # versioned ISOs + SHA256SUMS
-```
+## The desktop
 
-The outputs are `target/bos-live.iso` and `target/bos-install.iso`. Release assets land in `target/release-0.6.0/`. Boot the **Live ISO** as a UEFI CD-ROM. The **Install ISO** includes a Linux script for installing bOS onto a dedicated drive. See the [installation guide](docs/INSTALL.md).
+Drag a window by its title bar and resize it by its lower-right corner. Double-click the title to maximize. The dock restores minimized windows. Open the overview with **Super**, type an application name and press **Enter**. Right-click for file and window actions. Click the clock for a calendar or the network indicator for the connection state.
 
-### Save files between reboots
+![A recording of moving, minimizing and restoring Browser in the booted OS](docs/screenshots/window-motion.webp)
 
-```sh
-target/release/mkusers target/users.img
-bash scripts/run-qemu.sh target/esp target/users.img
-```
-
-Create the disk once and reuse it on subsequent boots. Run `sync` before closing QEMU. The bSH commands `reboot` and `halt` also flush pending writes. The preview supports this setup with one legacy VirtIO block disk in QEMU. The bFS volume is buffered in RAM and has no journal.
-
-### First commands
-
-```text
-help
-whoami
-pwd
-bitstat
-bfetch
-calculator 2 + 3 * 4
-/applications/hello.bh
-ls /
-cd documents
-notepad
-```
-
-Type a line in the editor, then `.save` to write it or `.quit` to discard it. Run `cat notes.txt` to read the file. Use `cd` to return home. Up and Down browse command history, Left and Right move the cursor, and Tab completes commands and paths. The prompt is green, regular output is white, and blue and yellow highlight details. Errors are red. Colors appear in the serial terminal and on the framebuffer screen.
-
-### babo editor
-
-Run `babo [file]` in bSH. With no filename it opens `/users/default/documents/notes.txt`.
-It provides line numbers, horizontal and vertical scrolling, search, go-to-line,
-undo/redo, line cut/paste, and confirmation before discarding changes.
-UTF-8 text is preserved, and UTF-8 input is accepted over the serial terminal.
-Files can be up to 128 KiB. Saving stages a new file before replacing the original.
-
-| Shortcut | Action |
+| Application | What it does |
 | --- | --- |
-| Ctrl+S / Ctrl+O | Save and flush the mounted filesystem |
-| Ctrl+Q / Ctrl+X | Quit |
-| Ctrl+W / Ctrl+N | Search / next match |
-| Ctrl+Z / Ctrl+Y | Undo / redo |
-| Ctrl+K / Ctrl+U | Cut line / paste |
-| Ctrl+G | Go to line |
-| Home / End / PgUp / PgDn | Navigate |
+| Files | Browse volumes as icons or a list. Create and rename items, copy directories, open text in Notes and preview JPEGs. |
+| Browser | Open addresses or searches, follow links, enter text and submit forms. Go back, forward, reload or scroll a page. |
+| Terminal | Run bSH commands and ring-3 programs. Each window has its own working directory, command history, color output and scrollback. Tab completes commands and paths. |
+| Notes | Edit UTF-8 text, select by mouse or keyboard, copy, paste and save under a new name. |
+| Calculator | Evaluate integer arithmetic with parentheses. |
+| System Monitor | Follow CPU activity and inspect allocated RAM, uptime and open windows. |
+| Settings | Change language, theme, accent, wallpaper, animation speed, shadows, transparency, clock and pointer speed. |
+| Widgets | Operate a switch, slider and segmented control, test the PC speaker and save a text field. |
+| Snake | Steer with the arrow keys or WASD. Space starts or pauses the game. |
+| About | Inspect the version, architecture and source revision of the running system. |
 
-## Русский
+The interface starts in **English**. Click **EN** on the top bar or select **Settings → Language → Русский**. **Ctrl+Space** changes the physical keyboard layout independently. **Alt+Tab** switches windows, **Alt+F4** closes the active window, and **F12** switches between the desktop and full-screen bSH. **Ctrl+L** focuses the browser address, **Ctrl+B/F** follows its history and **Ctrl+S** saves in Notes.
 
-**bOS — компактная терминальная операционная система для x86-64 UEFI.** После загрузки открывается bSH, где можно работать с файлами, редактировать заметки и подключать тома bFS. Ядро написано на Rust без стандартной библиотеки. Сеанс начинается в `/users/default`, а в корне находятся три каталога.
+## Browse the web
 
-```text
-/
-├── system/         журналы, временные файлы и точки монтирования
-├── users/
-│   └── default/    documents, downloads, pictures, music, videos
-└── applications/   приложения
+The image carries go-webengine and its Goja JavaScript interpreter as a WebAssembly executable. Wasmi runs it inside the bOS kernel. The guest obtains an IPv4 lease over Ethernet, resolves DNS and validates HTTPS certificates against its clock and certificate roots. Each browser window has an in-memory cookie jar. The download includes the engine, fonts and CA roots, so the desktop and terminal start offline.
+
+![The public Wikipedia portal rendered by the browser inside bOS](docs/screenshots/browser-wikipedia.png)
+
+The browser lays out HTML and CSS including flex and grid, paints images and SVG, executes page scripts and submits URL-encoded forms. It presents a styled viewport while images and scripts continue loading. The guest tests check CSS sizing, a JavaScript color change, link navigation and an actual HTTP POST. Public HTTPS checks have opened Wikipedia, Example Domain and Learn Rust.
+
+Web compatibility is partial. Large script-heavy applications can be slow or incomplete. Sites that depend on streaming video, DRM, WebRTC or a browser extension need capabilities outside this release. The native transport accepts up to 8 MiB per resource. A separate terminal command, `web https://example.com/`, provides a 64 KiB text view. [Web engine source](https://github.com/go-webengine/engine/tree/v0.48.0) · [Architecture](docs/ARCH.md)
+
+## Files, shell and programs
+
+Fresh sessions keep changes in RAM. To keep documents and settings across reboots, attach a separate FAT12 or FAT16 volume labelled **BOSDATA**, or an existing bFS users volume. It mounts at `/users`. The home folder is `/users/default`. Desktop preferences live in `.config/desktop.cfg`. From a source checkout, this example creates a new empty data disk.
+
+```sh
+mkdir -p target
+test ! -e target/users-fat.img && truncate -s 16M target/users-fat.img && \
+  mkfs.fat -F 16 -n BOSDATA target/users-fat.img
+BOS_DATA=target/users-fat.img bash scripts/run-qemu.sh --live
 ```
 
-В bOS 0.2.0 каталог `/users` можно хранить на отдельном диске bFS в QEMU. Команда `/applications/hello.bh` запускает ELF64 в пользовательском режиме. Исполняемые пользовательские программы bOS используют расширение `.bh`. Без диска данных изменения хранятся в RAM. Утилиты для Linux собираются отдельно.
+The live disk includes seven ELF32 programs and implements the ClaudeOS `int 0x80` ABI with isolated address spaces, preemption, sleeping processes and background jobs. In Terminal or full-screen bSH, try the following.
 
-В bOS 0.3.0 консоль framebuffer отображает 16 цветов ANSI для текста и фона. Команда `lspci` показывает PCI ID устройств, обнаруженных bOS.
-
-В 0.4.0 появились DHCPv4 и `ping` для Intel 82540EM. Версия 0.5.0 добавляет Intel 82574L, Realtek RTL8139 и ручную настройку IPv4. Версия 0.6.0 добавляет базовую диагностику M0: `dmesg`, замер времени загрузки, best-effort crash-log, битмап на 64 ГиБ, повторяемую RAM-матрицу QEMU и CI. См. [матрицу статуса](docs/STATUS.md) и [changelog](CHANGELOG.md).
-
-### Диагностика загрузки
-
-```text
-dmesg          # кольцевой журнал ядра, 64 КиБ
-dmesg -c       # вывести и очистить журнал
-bootstat       # время загрузки, частота TSC, размер журнала
-uptime         # тики таймера и миллисекунды с момента входа в ядро
-crashlog       # прочитать панику, сохранённую предыдущей загрузкой
-crashlog -c    # очистить crash-log
-```
-
-Crash-log записывается только после монтирования `/users`. Запись использует
-неблокирующую блокировку VFS, поэтому паника при занятой файловой системе
-может остаться только в serial-консоли. Актуальные ограничения перечислены в
-[STATUS.md](docs/STATUS.md).
-
-### Ethernet в bSH
-
-```text
-lspci
+```sh
+hello one two
+primes 30
+counter 10 &
+ps
 ifconfig
-ping 10.0.2.2
-ifconfig static 10.0.2.15/24 10.0.2.2
-ifconfig dhcp
+mem
 ```
 
-Адреса в примере относятся к виртуальной сети QEMU. При загрузке bOS выбирает одну карту как `eth0` и запускает DHCP. Ручные настройки действуют до перезагрузки. Для выбора виртуальной карты передайте `BOS_NIC=e1000e` или `BOS_NIC=rtl8139` скрипту `scripts/run-qemu.sh`.
+Use `joblog PID` to read a job's output and `kill PID` to stop it. The optional full UEFI image also has the native x86-64 process runtime and an experimental static Linux ABI with nash and uutils. [i386 examples](userspace/compat32) · [Syscall ABI](docs/abi.md) · [Full userspace](docs/UPSTREAM-USERSPACE.md)
 
-В QEMU проверены Intel 82540EM (`8086:100e`), Intel 82574L (`8086:10d3`) и Realtek RTL8139 (`10ec:8139`). На физических картах проверка ещё не проводилась. Для RTL8168/8111 и Wi-Fi нужны отдельные драйверы.
+## Build and test
 
-### Сборка и запуск
-
-На Linux установите Rust через rustup, GNU tar, GNU binutils, QEMU x86-64 и OVMF. Для сборки ISO также понадобятся Python 3 с пакетом `pycdlib`, `dosfstools` и `mtools`. Версия Rust и целевые платформы указаны в `rust-toolchain.toml`.
+On x86-64 Linux install rustup, Go 1.27.4 or newer, Python 3, Clang, GNU binutils and patch. The repository pins the Rust nightly and firmware targets. The first build downloads the locked Go and Cargo dependencies. Set `BOS_GO` to an absolute Go executable path if it is outside your PATH. QEMU, OVMF, OpenSSL, dosfstools and Python Pillow are used by the guest checks.
 
 ```sh
-bash scripts/build.sh --release
-bash scripts/run-qemu.sh
+bash scripts/build.sh --live
+bash scripts/run-qemu.sh --live
+bash scripts/test-host.sh
+python3 scripts/test-live.py
+python3 scripts/test-browser.py --uefi --public https://example.com/
+python3 scripts/test-live-storage.py
 ```
 
-По умолчанию QEMU получает 1 ГиБ и запускается с `-cpu max`. Объём памяти можно задать через `BOS_MEMORY` (например, `4G`), путь к OVMF — через `OVMF_CODE`. Чтобы собрать оба образа:
+The live disk is written to `target/live/bos-live.img`. The launcher selects KVM when available. `bash scripts/release.sh 1.0.0` produces the versioned image and checksums. [Test matrix](docs/STATUS.md) · [Changelog](CHANGELOG.md)
 
-```sh
-python3 scripts/mkiso.py
-python3 scripts/mkiso.py --install
-bash scripts/release.sh   # версионированные ISO + SHA256SUMS
-```
-
-Образы появятся в `target/bos-live.iso` и `target/bos-install.iso`. Релизные файлы — в `target/release-0.6.0/`. **Live ISO** загружается как UEFI CD-ROM. **Install ISO** содержит скрипт для установки на отдельный накопитель из Linux. См. [инструкцию по установке](docs/INSTALL.md).
-
-### Постоянный диск bFS
-
-```sh
-target/release/mkusers target/users.img
-bash scripts/run-qemu.sh target/esp target/users.img
-```
-
-Создайте образ один раз и используйте его при следующих запусках. Перед закрытием QEMU выполните `sync`. Команды bSH `reboot` и `halt` также сбрасывают изменения на диск. В 0.2.0 проверен отдельный диск VirtIO в QEMU. bFS кэширует том в RAM и работает без журнала.
-
-В bSH попробуйте `help`, `whoami`, `pwd` и `ls /`. Команда `bitstat` показывает разрядность ядра bOS, а `bfetch` выводит версию ОС, процессор, память и параметры консоли. Введите `calculator.bh` для запуска встроенного калькулятора или `calculator 2 + 3 * 4` для одного вычисления. В интерактивном режиме команда `quit` возвращает в bSH. Для записи заметки откройте `notepad`, введите текст и завершите командой `.save`. Команда `cd` возвращает в домашний каталог. Стрелки вверх и вниз листают историю команд, влево и вправо перемещают курсор. Tab дополняет команды и пути. Приглашение зелёное, основной текст белый, детали выделяются синим и жёлтым, ошибки красные. Оформление работает в последовательном терминале и на экране framebuffer.
-
-### Редактор babo
-
-Введите `babo [файл]` в bSH. Без имени открываются заметки
-`/users/default/documents/notes.txt`. Редактор показывает номера строк,
-поддерживает прокрутку, поиск, переход к строке, отмену и повтор изменений,
-вырезание и вставку строки. Перед выходом с несохранёнными изменениями
-появляется подтверждение. Ограничение файла — 128 КиБ.
-
-`Ctrl+S` сохраняет, `Ctrl+Q` закрывает, `Ctrl+W` ищет,
-`Ctrl+N` переходит к следующему совпадению, `Ctrl+Z` отменяет,
-`Ctrl+Y` повторяет, `Ctrl+K` вырезает строку, `Ctrl+U` вставляет,
-`Ctrl+G` переходит к строке. Для выбора сохранения или отмены при выходе
-введите `s` или `d` и нажмите Enter. Файлы UTF-8 сохраняются,
-ввод UTF-8 поддерживается через последовательный терминал.
-
-Проверка release-сборки: `bash scripts/test-host.sh`, `python3 scripts/test-qemu.py` и `python3 scripts/test-boot-matrix.py`. Первый запускает host-тесты, второй — загрузку, ELF64, bFS, редактор, диагностику M0 и Ethernet, третий — загрузку с 512 МиБ, 1 ГиБ и 4 ГиБ RAM.
-
-Подробнее об устройстве системы см. в [описании архитектуры](docs/ARCH.md). Что реально проверено, а что только планируется, — в [STATUS.md](docs/STATUS.md).
-
-## Инструменты для Linux
-
-Следующие утилиты запускаются в Linux из каталога проекта. Текущий режим
-загрузки bOS использует встроенную оболочку `bSH`. Утилита `bnet` использует
-сеть Linux-хоста. Команды `ifconfig` и `ping` в bSH используют сеть ядра bOS.
-
-## bPT · bOS Package Tool
-
-**From a GitHub file to an installed package in one command.** bPT 0.1.0 is a Linux-host package manager for the bOS workspace. It offers an APT-style command line for the [official catalog](~BPT-PROGS/registry.json) and can install a regular file, directory or repository directly from public GitHub sources.
-
-**От файла на GitHub до установленной программы одной командой.** bPT 0.1.0 запускается в Linux и устанавливает пакеты в каталог `applications/` проекта bOS. В [`~BPT-PROGS/`](~BPT-PROGS/) находятся официальный индекс и первые программы.
-
-```sh
-cargo +stable build --locked --release -p bpt
-system/bpt update
-system/bpt search hello
-system/bpt install hello
-applications/hello/hello.bh
-system/bpt install https://github.com/dr-lexus-dr/bos/blob/v0.1.0/docs/INSTALL.md
-system/bpt list --installed
-```
-
-Supported commands include `update`, `list`, `search`, `show`, `install`, `reinstall`, `upgrade`, `remove`, `autoremove`, `depends`, `check`, `download` and `clean`. See the [bPT guide / руководство по bPT](docs/BPT.md) for the catalog format and current limits.
-
-## Text editor — `btext`
-
-The standard bOS text editor:
-
-```
-system/text-editor <file>     # open or create a file
-```
-
-Line-oriented editing with numbered lines: `p` print, `e <n> <text>` replace,
-`i <n> <text>` insert, `a <text>` append, `d <n> [m]` delete,
-`s/old/new[/g]` substitute, `/text` search, `w` save, `q` quit.
-Run `btext <file>` and type `h` for the full command list.
-
-Build: `cargo build -p btext` (sources in `userspace/btext/`).
-
-## Internet support — `bnet`
-
-```
-system/network check              # interfaces, DNS, HTTP/HTTPS connectivity check
-system/network ping <host> [n]    # ping a host
-system/network dns <hostname>     # resolve a hostname
-system/network http <url>         # HTTP GET with headers and timing
-system/network download <url> [file]
-                                  # download a URL with progress
-system/network wget <url> [-O file]
-                                  # wget-style download syntax
-system/network git <args...>     # run Git on the Linux host
-system/network interfaces         # list network interfaces
-system/network port <host> <port> # check if a TCP port is open
-system/network traceroute <host>  # trace route to host
-```
-
-The kernel side lives in `drivers/net` (e1000/rtl8139/virtio-net stubs);
-ARP/IPv4/TCP and `SYS_NET_*` syscalls are next (see `docs/ARCH.md`).
-
-`bnet` runs on the Linux host and uses the host network. `wget` is a download
-alias; `git` forwards arguments to the host's Git installation. For example:
-
-```sh
-system/network wget https://example.com/archive.tar.gz -O archive.tar.gz
-system/network git clone https://github.com/owner/repository.git
-```
-
-Build: `cargo build -p bnet` (sources in `userspace/bnet/`).
-
-## Сборка утилит для Linux
-
-```sh
-cargo +stable build -p bpt -p bnet -p btext
-```
-
-`bnet` запускается в Linux и использует сеть хоста. Команда `wget` скачивает
-файл (`-O` задаёт путь), а `git` передаёт аргументы установленному в Linux
-исполняемому файлу Git:
-
-```sh
-system/network wget https://example.com/archive.tar.gz -O archive.tar.gz
-system/network git clone https://github.com/owner/repository.git
-```
-
-## Шрифт консоли
-
-Встроенная таблица глифов сгенерирована из `Lat15-VGA16.psf.gz` пакета `console-setup-linux`. Скрипт генерации находится в [scripts/genfont.py](scripts/genfont.py).
-
-## bitstat on Linux / bitstat в Linux
-
-The standalone utility reports the running x86 Linux kernel architecture. In bSH, `bitstat` reports the bOS kernel architecture.
-
-Утилита показывает разрядность запущенного ядра Linux на x86. В bSH одноимённая команда показывает разрядность bOS.
-
-```sh
-cc -std=c11 -Wall -Wextra bitstat.c -o bitstat
-./bitstat
-```
+bOS is licensed under GPL-3.0. The release includes Papirus icons, Inter and Terminus glyphs, Wasmi, go-webengine and Igor Pavlov's LZMA decoder. The boot partition includes `NOTICES.TXT`. The desktop applications and i386 compatibility layer follow the public ClaudeOS interface. [License](LICENSE) · [Third-party notices](third_party) · [ClaudeOS](https://github.com/photonest444/claudeos)

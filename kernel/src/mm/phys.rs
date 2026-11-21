@@ -25,6 +25,8 @@ static FRAME_ALLOCATOR: spin::Mutex<Option<FrameAllocator>> = spin::Mutex::new(N
 static TOTAL_MEMORY: AtomicU64 = AtomicU64::new(0);
 /// Used physical memory
 static USED_MEMORY: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "live")]
+static PEAK_USED: AtomicU64 = AtomicU64::new(0);
 /// Free physical memory
 static FREE_MEMORY: AtomicU64 = AtomicU64::new(0);
 
@@ -32,7 +34,7 @@ static FREE_MEMORY: AtomicU64 = AtomicU64::new(0);
 ///
 /// Initialization precedes the heap. The singleton borrows static storage;
 /// it must not be constructed a second time while the first instance is live.
-const MAX_MAP_ENTRIES: usize = 256;
+const MAX_MAP_ENTRIES: usize = if cfg!(feature = "live") { 1 } else { 256 };
 static mut MAP_BUF: [MemoryRegion; MAX_MAP_ENTRIES] = [MemoryRegion {
     base_addr: 0,
     length: 0,
@@ -43,7 +45,7 @@ static mut MAP_BUF: [MemoryRegion; MAX_MAP_ENTRIES] = [MemoryRegion {
 /// Static backing for the frame bitmap (same no-heap constraint as above).
 /// 262144 words = 2 MiB .bss, covers 64 GiB of RAM.  The previous 16 GiB cap
 /// made a 32 GiB QEMU guest panic during boot with "frame bitmap needs ...".
-const MAX_BITMAP_WORDS: usize = 262_144;
+const MAX_BITMAP_WORDS: usize = if cfg!(feature = "live") { 4096 } else { 262_144 };
 static mut BITMAP_BUF: [u64; MAX_BITMAP_WORDS] = [0; MAX_BITMAP_WORDS];
 static mut ALLOCATED_BUF: [u64; MAX_BITMAP_WORDS] = [0; MAX_BITMAP_WORDS];
 
@@ -331,10 +333,10 @@ impl FrameAllocator {
 
     fn update_stats(&self) {
         FREE_MEMORY.store(self.free_frames as u64 * FRAME_SIZE, Ordering::SeqCst);
-        USED_MEMORY.store(
-            (self.usable_frames - self.free_frames) as u64 * FRAME_SIZE,
-            Ordering::SeqCst,
-        );
+        let used = (self.usable_frames - self.free_frames) as u64 * FRAME_SIZE;
+        USED_MEMORY.store(used, Ordering::SeqCst);
+        #[cfg(feature = "live")]
+        PEAK_USED.fetch_max(used, Ordering::Relaxed);
     }
 
     /// Get total memory
@@ -448,6 +450,9 @@ pub fn free_memory() -> u64 {
 pub fn used_memory() -> u64 {
     USED_MEMORY.load(Ordering::SeqCst)
 }
+
+#[cfg(feature = "live")]
+pub fn peak_used() -> u64 { PEAK_USED.load(Ordering::Relaxed) }
 
 /// Get memory map
 pub fn memory_map() -> Vec<MemoryRegion> {

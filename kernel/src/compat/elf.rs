@@ -20,6 +20,10 @@ pub(crate) struct Segment<'a> {
 
 pub(crate) struct Executable<'a> {
     pub entry: u64,
+    pub linux: bool,
+    pub bias: u64,
+    pub phdr: u64,
+    pub phnum: usize,
     data: &'a [u8],
     headers: &'a [u8],
 }
@@ -29,7 +33,7 @@ impl<'a> Executable<'a> {
         if data.len() < 64
             || !is_elf(data)
             || data[4..7] != [2, 1, 1]
-            || u16_at(data, 16) != 2
+            || !matches!(u16_at(data, 16), 2 | 3)
             || u16_at(data, 18) != 62
             || u32_at(data, 20) != 1
             || u16_at(data, 52) != 64
@@ -49,8 +53,18 @@ impl<'a> Executable<'a> {
         let headers = data
             .get(offset..end)
             .ok_or("truncated program header table")?;
+        let linux = u16_at(data, 16) == 3;
+        let bias = if linux { 0x80_0000_0000 } else { 0 };
+        // Static PIE carries its program headers in the first PT_LOAD.
+        let phdr = headers.chunks_exact(56).find_map(|h| {
+            let start = u64_at(h, 8);
+            (u32_at(h, 0) == 1 && start <= offset as u64
+                && offset as u64 + (count * 56) as u64 <= start + u64_at(h, 32))
+                .then(|| bias + u64_at(h, 16) + offset as u64 - start)
+        }).unwrap_or(0);
         Ok(Self {
-            entry: u64_at(data, 24),
+            entry: bias + u64_at(data, 24),
+            linux, bias, phdr, phnum: count,
             data,
             headers,
         })
@@ -61,7 +75,8 @@ impl<'a> Executable<'a> {
             .chunks_exact(56)
             .filter_map(|header| match u32_at(header, 0) {
                 1 => Some(self.segment(header)),
-                2 | 3 | 7 => Some(Err("dynamic linking and TLS are unavailable")),
+                3 => Some(Err("ELF interpreters are unavailable")),
+                2 | 7 if !self.linux => Some(Err("native dynamic linking and TLS are unavailable")),
                 _ => None,
             })
     }
@@ -69,7 +84,7 @@ impl<'a> Executable<'a> {
     fn segment(&self, header: &[u8]) -> Result<Segment<'a>, &'static str> {
         let flags = u32_at(header, 4);
         let offset = usize::try_from(u64_at(header, 8)).map_err(|_| "invalid segment offset")?;
-        let address = u64_at(header, 16);
+        let address = self.bias.checked_add(u64_at(header, 16)).ok_or("segment overflow")?;
         let file_size = u64_at(header, 32);
         let size = u64_at(header, 40);
         let alignment = u64_at(header, 48);

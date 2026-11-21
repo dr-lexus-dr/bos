@@ -23,7 +23,7 @@ static WRITER_LOCK: Mutex<()> = Mutex::new(());
 
 /// 64 KiB of recent kernel messages.  Stored in `.bss`; no heap is needed to
 /// append, so messages survive until the heap and bSH are ready.
-const DMESG_CAP: usize = 64 * 1024;
+const DMESG_CAP: usize = if cfg!(feature = "live") { 12 * 1024 } else { 64 * 1024 };
 
 struct RingBuffer {
     buf: [u8; DMESG_CAP],

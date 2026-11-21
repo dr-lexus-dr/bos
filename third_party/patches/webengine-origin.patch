@@ -1,0 +1,11 @@
+--- a/settle_scripts.go
++++ b/settle_scripts.go
+@@ -146,7 +146,7 @@
+ 	return js.Options{
+ 		PageURL:             doc.URL,
+ 		UserAgent:           e.UserAgent,
+-		Client:              e.Client,
++		Client:              e.desktopScriptClient(doc.URL),
+ 		Ctx:                 ctx,
+ 		Timeout:             e.JSTimeout,
+ 		ViewportWidth:       vpW,

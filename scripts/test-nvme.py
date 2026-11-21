@@ -8,7 +8,7 @@ import tempfile
 from qemu_console import boot
 
 ROOT = Path(__file__).resolve().parents[1]
-PROMPT = b"bSH> "
+PROMPT = b"bSH ~ % "
 
 
 def main():

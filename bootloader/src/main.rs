@@ -10,7 +10,8 @@ use alloc::{vec::Vec, string::String};
 use alloc::vec;
 use core::{mem, ptr, slice};
 use uefi::prelude::*;
-use uefi::proto::console::gop::{GraphicsOutput, PixelFormat as UefiPixelFormat};
+mod display;
+use display::setup_framebuffer;
 use uefi::proto::loaded_image::LoadedImage;
 use uefi::proto::media::file::{File, FileMode, FileAttribute, FileInfo, Directory};
 use uefi::fs::{FileSystem, Path};
@@ -22,7 +23,7 @@ use uuid::{Builder, Uuid};
 
 use bloader_shared::{
     KernelHeader, BootInfo, MemoryRegion, MemoryType, MemoryFlags,
-    FramebufferInfo, PixelFormat,
+    FramebufferInfo,
     KernelEntryFn, KernelFlags, BootError,
     KERNEL_MAGIC, BOOT_PROTOCOL_VERSION, MAX_CMDLINE_LEN,
 };
@@ -69,7 +70,7 @@ fn boot(mut system_table: SystemTable<Boot>, image_handle: Handle) -> Status {
 
     info!("Boot stage: acquiring GOP framebuffer");
     boot_services.stall(3_000_000);
-    let framebuffer = if option_env!("BLOADER_NO_GOP").is_some() { None } else { setup_framebuffer(boot_services) };
+    let framebuffer = if option_env!("BLOADER_NO_GOP").is_some() { None } else { setup_framebuffer(boot_services, false) };
     info!("Boot stage: GOP complete: {:?}", framebuffer);
     info!("Boot stage: reading ACPI and load options");
     boot_services.stall(3_000_000);
@@ -553,44 +554,6 @@ fn load_initrd(
 
     info!("Initrd loaded: {} bytes at 0x{:x}", file_size, addr);
     Ok((Some(addr), Some(file_size as u64)))
-}
-
-fn setup_framebuffer(boot_services: &BootServices) -> Option<FramebufferInfo> {
-    let gop_handle = boot_services
-        .get_handle_for_protocol::<GraphicsOutput>()
-        .ok()?;
-    // Do not claim GOP exclusively: firmware console drivers may already own
-    // it. Exclusive access can disconnect the console used by our logger.
-    // We only snapshot the current mode; no SetMode or firmware drawing calls.
-    let mut gop = unsafe {
-        boot_services.open_protocol::<GraphicsOutput>(
-            uefi::table::boot::OpenProtocolParams {
-                handle: gop_handle,
-                agent: boot_services.image_handle(),
-                controller: None,
-            },
-            uefi::table::boot::OpenProtocolAttributes::GetProtocol,
-        )
-    }.ok()?;
-
-    let mode = gop.current_mode_info();
-    let (w, h) = mode.resolution();
-    let pixel_format = match mode.pixel_format() {
-        UefiPixelFormat::Rgb => PixelFormat::RGB,
-        UefiPixelFormat::Bgr => PixelFormat::BGR,
-        UefiPixelFormat::Bitmask => PixelFormat::Bitmask,
-        UefiPixelFormat::BltOnly => return None,
-    };
-    let base = gop.frame_buffer().as_mut_ptr() as u64;
-
-    Some(FramebufferInfo {
-        base_addr: base,
-        width: w as u32,
-        height: h as u32,
-        stride: mode.stride() as u32,
-        pixel_format,
-        bits_per_pixel: 32,
-    })
 }
 
 fn find_rsdp(system_table: &SystemTable<Boot>) -> Option<u64> {

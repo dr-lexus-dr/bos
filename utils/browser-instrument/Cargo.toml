@@ -1,0 +1,6 @@
+[package]
+name = "bos_browser_instrument"
+version = "1.0.0"
+edition = "2021"
+[dependencies]
+wasmparser = { version = "=0.228.0", default-features = false, features = ["std","validate","features","prefer-btree-collections"] }

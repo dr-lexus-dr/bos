@@ -30,7 +30,7 @@ lazy_static! {
         gdt.append(Descriptor::kernel_data_segment());      // 2: Kernel DS
         gdt.append(Descriptor::user_code_segment());        // 3: User CS64
         gdt.append(Descriptor::user_data_segment());        // 4: User DS
-        gdt.append(Descriptor::kernel_code_segment());      // 5: User CS32 (compat)
+        gdt.append(Descriptor::UserSegment(0x00cf_fa00_0000_ffff)); // 5: User CS32 (compat)
         gdt.append(Descriptor::tss_segment(&TSS));          // 6: TSS
         gdt
     };
@@ -39,10 +39,11 @@ lazy_static! {
         let mut tss = x86_64::structures::tss::TaskStateSegment::new();
         // Separate stack for synchronous transitions from user mode.
         #[repr(align(16))]
-        struct UserTrapStack([u8; 32 * 1024]);
-        static mut USER_TRAP_STACK: UserTrapStack = UserTrapStack([0; 32 * 1024]);
+        struct UserTrapStack([u8; TRAP_STACK_BYTES]);
+        const TRAP_STACK_BYTES: usize = if cfg!(feature = "live") { 64 * 1024 } else { 256 * 1024 };
+        static mut USER_TRAP_STACK: UserTrapStack = UserTrapStack([0; TRAP_STACK_BYTES]);
         let stack = unsafe { core::ptr::addr_of!(USER_TRAP_STACK.0) as u64 };
-        tss.privilege_stack_table[0] = x86_64::VirtAddr::new(stack + 32 * 1024);
+        tss.privilege_stack_table[0] = x86_64::VirtAddr::new(stack + TRAP_STACK_BYTES as u64);
         // Set up IST (Interrupt Stack Table) for double fault, NMI, etc.
         tss.interrupt_stack_table[0] = {
             static mut IST_STACK: [u8; 4096 * 4] = [0; 4096 * 4];

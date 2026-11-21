@@ -9,7 +9,7 @@ use x86_64::structures::paging::PageTableFlags;
 use lazy_static::lazy_static;
 use log::{info, warn, trace};
 
-const MAX_CPUS: usize = 256;
+const MAX_CPUS: usize = if cfg!(feature = "live") { 1 } else { 256 };
 const PERCPU_SIZE: usize = 4096; // 4KB per CPU
 
 static CPU_COUNT: AtomicU32 = AtomicU32::new(1);

@@ -13,8 +13,10 @@
 #                         [--host-only] [--recovery] [-h|--help]
 #
 # Examples:
-#   bash scripts/build.sh                      # debug build, ESP -> target/esp
+#   bash scripts/build.sh                      # compact graphical live disk
+#   bash scripts/build.sh --full               # full debug build, ESP -> target/esp
 #   bash scripts/build.sh --release            # release build for everything
+#   bash scripts/build.sh --live               # compact graphical live disk
 #   bash scripts/build.sh --host-only          # only bfs/binit/bsh/bcoreutils
 #   bash scripts/build.sh --esp /tmp/esp-test  # custom ESP staging dir
 #
@@ -22,6 +24,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
+
+if [[ $# -eq 0 || ( $# -eq 1 && $1 == --live ) ]]; then exec python3 scripts/build-live.py; fi
 
 PROFILE="debug"
 CARGO_PROFILE_FLAG=""          # empty = debug, "--release" = release
@@ -45,6 +49,7 @@ usage() { awk '/^# bOS full build/{p=1} /^set -euo pipefail/{p=0} p' "$0" | sed 
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --full)             shift ;;
         --release)          PROFILE="release"; CARGO_PROFILE_FLAG="--release"; shift ;;
         --esp)              ESP="${2:?--esp needs a directory}"; shift 2 ;;
         --esp=*)            ESP="${1#--esp=}"; shift ;;
@@ -104,6 +109,8 @@ cargo build --locked $CARGO_PROFILE_FLAG -p bfs -p binit -p bsh -p bcoreutils
 for b in "${HOST_BINS[@]}"; do
     [[ -x "target/$PROFILE/$b" ]] || die "host binary missing after build: target/$PROFILE/$b"
 done
+bash scripts/build-upstream-userspace.sh ${CARGO_PROFILE_FLAG:+--release}
+
 log "host tools OK: $(ls target/$PROFILE/{binit,bsh,bcoreutils} | tr '\n' ' ')"
 
 # --- 2. UEFI bootloader --------------------------------------------------------
@@ -142,6 +149,7 @@ if [[ "$SKIP_BOOTLOADER" -eq 0 || "$SKIP_KERNEL" -eq 0 || "$SKIP_INITRD" -eq 0 ]
         cp -f "target/$KERNEL_TARGET/$PROFILE/bos_kernel" "$ESP/EFI/bOS/kernel.bin"
     fi
     if [[ "$SKIP_INITRD" -eq 0 ]]; then
+        bash scripts/build-upstream-userspace.sh --native
         need tar
         need as
         need ld
@@ -159,6 +167,11 @@ if [[ "$SKIP_BOOTLOADER" -eq 0 || "$SKIP_KERNEL" -eq 0 || "$SKIP_INITRD" -eq 0 ]
             applications/calculator.bh applications/notepad.bh \
             system/init.sh system/bpt system/bpm system/network system/text-editor \
             users/default/.profile -C target/user --transform='s,^\([^/]*\.bh\)$,applications/\1,' hello.bh native-demo.bh process-test.bh pipe-reader.bh pipe-writer.bh child-exit.bh native-init.bh native-shell.bh native-cat.bh native-wc.bh
+        bash scripts/build-browser.sh
+        tar -rf "$ESP/EFI/bOS/initrd.img" --format=ustar --mtime=@0 --owner=0 --group=0 \
+            -C target --transform='s,^,system/,' browser.bweb browser-notices.txt
+        tar -rf "$ESP/EFI/bOS/initrd.img" --format=ustar --mtime=@0 --owner=0 --group=0 \
+            -C target/native bin
         if [[ "$RECOVERY" -eq 1 ]]; then
             printf 'Explicit recovery boot\n' > target/user/recovery
             tar -rf "$ESP/EFI/bOS/initrd.img" --format=ustar --mtime=@0 --owner=0 --group=0 \

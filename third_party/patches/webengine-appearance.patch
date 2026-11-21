@@ -1,0 +1,73 @@
+--- a/css/lightdark.go
++++ b/css/lightdark.go
+@@ -51,17 +51,9 @@
+ 	return cs, true
+ }
+ 
+-// UsedDark reports whether the element's used colour scheme is dark, per the
+-// "determine the used color scheme" algorithm of CSS Color Adjust 1 §2.3 with
+-// this engine's fixed preference: when an element supports BOTH schemes the
+-// preferred one is used, which here is dark — the same fixed answer
+-// js/window.go's matchMedia gives for `prefers-color-scheme` (the bench suite's
+-// reference Chromium runs with a dark appearance). One supported scheme is
+-// used as is. With none (`normal`) the UA default scheme applies, which is
+-// light: Gecko's LookAndFeel::ColorSchemeForStyle ("Otherwise default content
+-// to light"), and Chromium likewise renders a page that never opts in light.
++// bOS uses a light content canvas when the author supports both schemes.
+ func (cs ColorScheme) UsedDark() bool {
+-	return cs&ColorSchemeDark != 0
++	return cs&ColorSchemeDark != 0 && cs&ColorSchemeLight == 0
+ }
+ 
+ // resolveLightDark replaces every top-level light-dark(light, dark) function in
+--- a/css/media.go
++++ b/css/media.go
+@@ -107,10 +107,15 @@
+ 		}
+ 		q = rest
+ 	}
++	if colorScheme := mediaColorSchemeRe.FindStringSubmatch(q); len(colorScheme) > 0 && colorScheme[1] != "light" {
++		return false
++	}
+ 	return widthFeaturesHold(q, m.Width) && inputFeaturesHold(q) && resolutionFeaturesHold(q, m.scale())
+ }
+ 
+ var (
++	mediaColorSchemeRe = regexp.MustCompile(`prefers-color-scheme\s*:\s*([a-z-]+)`)
++
+ 	// (resolution: 2dppx), (min-resolution: 192dpi), (max-resolution: 1x)
+ 	mediaResolutionRe = regexp.MustCompile(`(min-|max-)?resolution\s*:\s*([0-9]*\.?[0-9]+)\s*(dppx|x|dpi|dpcm)`)
+ 	// Level 4 range form: (resolution >= 2dppx)
+--- a/js/window.go
++++ b/js/window.go
+@@ -511,29 +511,9 @@
+ 	return o
+ }
+ 
+-// mediaQueryMatches evaluates a window.matchMedia() query. It mirrors the CSS
+-// cascade so scripts and stylesheets agree on the environment:
+-//   - prefers-color-scheme: dark → true (the CSS cascade already applies dark
+-//     @media blocks optimistically, and the reference headless Chromium follows
+-//     the host's dark appearance); light → false.
+-//   - prefers-reduced-motion / prefers-contrast → the no-preference default
+-//     (false), matching a default browser.
+-//   - min-width / max-width → evaluated against the real viewport width.
+-//   - anything else → true (optimistic), matching the CSS media evaluation.
+-//
+-// This is what lets a class-strategy dark-theme site (react.dev calls
+-// matchMedia('(prefers-color-scheme: dark)') and adds `dark` to <html>) resolve
+-// to the same theme the Chrome reference renders.
++// Screen dimensions, pointer and color scheme use the same environment as CSS.
+ func (b *binder) mediaQueryMatches(q string) bool {
+ 	lq := strings.ToLower(q)
+-	if strings.Contains(lq, "prefers-color-scheme") {
+-		if strings.Contains(lq, "dark") {
+-			return true
+-		}
+-		if strings.Contains(lq, "light") {
+-			return false
+-		}
+-	}
+ 	if strings.Contains(lq, "prefers-reduced-motion") ||
+ 		strings.Contains(lq, "prefers-contrast") ||
+ 		strings.Contains(lq, "prefers-reduced-data") {

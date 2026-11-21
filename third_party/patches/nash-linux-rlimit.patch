@@ -1,0 +1,20 @@
+--- a/src/sys.rs
++++ b/src/sys.rs
+@@ -508,7 +508,7 @@
+ /// Get resource limits.
+ pub fn getrlimit(resource: libc::c_int) -> Option<libc::rlimit> {
+     let mut rl: libc::rlimit = unsafe { std::mem::zeroed() };
+-    match unsafe { libc::getrlimit(resource, &mut rl) } {
++    match unsafe { libc::getrlimit(resource as _, &mut rl) } {
+         0 => Some(rl),
+         _ => None,
+     }
+@@ -516,7 +516,7 @@
+ 
+ /// Set resource limits.
+ pub fn setrlimit(resource: libc::c_int, rl: &libc::rlimit) -> i32 {
+-    unsafe { libc::setrlimit(resource, rl) }
++    unsafe { libc::setrlimit(resource as _, rl) }
+ }
+ 
+ /// Get terminal attributes.

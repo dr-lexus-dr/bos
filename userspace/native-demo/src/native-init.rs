@@ -6,8 +6,9 @@ fn main() -> u8 {
         return 1;
     }
     let _ = libbos::write_all(1, b"init: PID 1 in ring 3\n");
+    let shell=if libbos::File::open(c"/system/native",libbos::READ_ONLY).is_ok(){c"/applications/native-shell.bh"}else{c"/bin/nash"};
     loop {
-        let child = match libbos::spawn(c"/applications/native-shell.bh", &[]) {
+        let child = match libbos::spawn(shell, &[]) {
             Ok(pid) => pid,
             Err(_) => return 2,
         };

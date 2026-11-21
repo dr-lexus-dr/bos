@@ -1,8 +1,16 @@
 [package]
 name = "bloader"
-version = "0.6.0"
+version = "1.0.0"
 edition = "2021"
 description = "bOS Bootloader - minimal UEFI bootloader for bOS"
+
+[features]
+live-efi = []
+
+[[bin]]
+name = "live-efi"
+path = "src/bin/live-efi.rs"
+required-features = ["live-efi"]
 
 [dependencies]
 uefi = { version = "0.23", features = ["alloc", "logger"] }

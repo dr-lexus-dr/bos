@@ -1,0 +1,61 @@
+--- a/js/session.go
++++ b/js/session.go
+@@ -60,6 +60,7 @@
+ type Session struct {
+ 	b    *binder
+ 	res  Result
++	watchdog *time.Timer
+ 	stop func()
+ 	done bool
+ }
+@@ -115,6 +116,7 @@
+ 	// One watchdog for the whole session: interrupt a runaway script once the
+ 	// budget is spent or the caller's context is cancelled. Stopped by Close.
+ 	timer := time.AfterFunc(opt.Timeout, func() { b.vm.Interrupt("script budget exceeded") })
++	s.watchdog = timer
+ 	done := make(chan struct{})
+ 	go func() {
+ 		select {
+@@ -128,6 +130,14 @@
+ 		close(done)
+ 	}
+ 	return s
++}
++
++// BeginInput gives a user gesture a fresh bounded turn after the page was idle.
++func (s *Session) BeginInput() {
++	if s.done || s.b.opt.Ctx.Err() != nil { return }
++	s.b.deadman = time.Now().Add(s.b.opt.Timeout)
++	s.watchdog.Reset(s.b.opt.Timeout)
++	s.b.vm.ClearInterrupt()
+ }
+ 
+ // SetMetrics installs (or replaces) the geometry/used-value source the DOM
+--- a/js/events.go
++++ b/js/events.go
+@@ -51,6 +51,7 @@
+ // handlers versus addEventListener ones. A non-function value (including
+ // null/undefined, the standard way script clears a handler) only removes.
+ func (b *binder) setOnHandler(n *dom.Node, typ string, v goja.Value) {
++	delete(n.Attr, "on"+typ) // An IDL assignment replaces an HTML event attribute.
+ 	if m := b.onHandlers[n]; m != nil {
+ 		if old, ok := m[typ]; ok {
+ 			b.removeListener(n, typ, old)
+@@ -126,6 +127,17 @@
+ 	}
+ 
+ 	for cur := n; cur != nil; cur = cur.Parent {
++		if src, ok := cur.Attribute("on"+typ); ok && src != "" && !b.expired() {
++			self := b.wrap(cur)
++			if obj != nil { obj.Set("currentTarget", self) }
++			if handler, err := b.vm.New(b.vm.Get("Function"), b.vm.ToValue("event"), b.vm.ToValue(src)); err == nil {
++				if fn, ok := goja.AssertFunction(handler); ok {
++					if result, err := fn(self,event); err == nil && result != nil && result.SameAs(b.vm.ToValue(false)) && obj != nil && obj.Get("cancelable").ToBoolean() {
++						obj.Set("defaultPrevented", true)
++					}
++				}
++			}
++		}
+ 		if m := b.listeners[cur]; m != nil {
+ 			self := b.wrap(cur)
+ 			if cur == b.windowNode || cur == b.docNode {

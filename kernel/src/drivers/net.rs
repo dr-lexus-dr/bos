@@ -1,4 +1,8 @@
 //! Ethernet and IPv4 for the built-in shell. All hardware access is polled.
+mod client;
+mod tls;
+pub fn unix_seconds() -> Option<u64> { tls::unix_seconds() }
+pub use client::{fetch,request};
 use alloc::{boxed::Box, string::String, vec, vec::Vec};
 use core::{fmt::Write, str::FromStr};
 use smoltcp::{
@@ -158,6 +162,7 @@ struct Network {
     ping_id: u16,
 }
 
+static LINK_WHILE_FETCHING:core::sync::atomic::AtomicBool=core::sync::atomic::AtomicBool::new(false);
 static NETWORK: Mutex<Option<Network>> = Mutex::new(None);
 
 pub fn init() {
@@ -336,6 +341,10 @@ pub fn poll() {
     }
 }
 
+pub fn online() -> bool {
+    NETWORK.lock().as_ref().map_or_else(||LINK_WHILE_FETCHING.load(core::sync::atomic::Ordering::Relaxed),|net| net.link && net.address.is_some())
+}
+
 fn host_address(subnet: Ipv4Cidr, address: Ipv4Address) -> bool {
     !address.is_unspecified()
         && !address.is_loopback()
@@ -362,7 +371,7 @@ pub fn ifconfig(args: &[&str], out: &mut String) -> i32 {
             }
             network.configure(None, None, &[]);
         }
-        ["static", cidr] | ["static", cidr, _] => {
+        ["static", cidr] | ["static", cidr, _] | ["static", cidr, _, _] => {
             let Ok(address) = Ipv4Cidr::from_str(cidr) else {
                 let _ = writeln!(out, "ifconfig: invalid IPv4 CIDR");
                 return 2;
@@ -384,15 +393,22 @@ pub fn ifconfig(args: &[&str], out: &mut String) -> i32 {
             } else {
                 None
             };
+            let mut servers = Vec::new();
+            if let Some(value) = args.get(3) {
+                match Ipv4Address::from_str(value) {
+                    Ok(ip) if !ip.is_unspecified() && !ip.is_multicast() && !ip.is_broadcast() => servers.push(ip),
+                    _ => { let _ = writeln!(out, "ifconfig: invalid DNS server"); return 2; }
+                }
+            }
             if let Some(handle) = network.dhcp.take() {
                 network.sockets.remove(handle);
             }
-            network.configure(Some(address), gateway, &[]);
+            network.configure(Some(address), gateway, &servers);
         }
         _ => {
             let _ = writeln!(
                 out,
-                "usage: ifconfig [dhcp | static <IPv4/prefix> [gateway]]"
+                "usage: ifconfig [dhcp | static <IPv4/prefix> [gateway [DNS]]]"
             );
             return 2;
         }

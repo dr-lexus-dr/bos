@@ -3,12 +3,17 @@ use x86_64::instructions::port::Port;
 pub fn init() { crate::arch::x86_64::pic::unmask(1); }
 pub fn handle_irq() { let mut p = Port::<u8>::new(0x60); let _sc: u8 = unsafe { p.read() }; }
 pub fn try_read() -> Option<u8> {
+    read_controller().and_then(|(aux, byte)| (!aux).then_some(byte))
+}
+
+/// The keyboard and mouse share one FIFO. Consume each byte exactly once.
+pub(crate) fn read_controller() -> Option<(bool, u8)> {
     let mut st = Port::<u8>::new(0x64);
     let status = unsafe { st.read() };
     if status == 0xff || status & 1 == 0 { return None; }
     let mut d = Port::<u8>::new(0x60);
     let byte = unsafe { d.read() };
     // The touchpad shares the controller: its AUX packets are not key codes.
-    if status & 0xe0 != 0 { return None; }
-    Some(byte)
+    if status & 0xc0 != 0 { return None; }
+    Some((status & 0x20 != 0, byte))
 }

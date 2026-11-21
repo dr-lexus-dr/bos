@@ -1,0 +1,21 @@
+--- a/interactive.go
++++ b/interactive.go
+@@ -43,6 +43,7 @@
+ 	sess     *js.Session
+ 	fonts    *paint.Fonts
+ 	viewport image.Rectangle
++	desktopScroll int
+ 	vpW, vpH int
+ 	stopHeap func()
+ 	closed   bool
+@@ -104,9 +105,7 @@
+ 	if d.closed {
+ 		return nil, nil, ErrClosed
+ 	}
+-	img := d.e.newCanvas(d.doc, d.rp, d.viewport, d.vpW)
+-	paint.PaintFull(img, d.rp.box, d.fonts, d.rp.imgs, d.rp.bgImgs)
+-	return img, renderInfo(d.doc, d.rp), nil
++	return d.desktopFrame(), renderInfo(d.doc, d.rp), nil
+ }
+ 
+ // Eval runs code in the document's live JS session and returns its value

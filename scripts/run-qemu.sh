@@ -1,5 +1,29 @@
 #!/bin/bash
 set -e
+if [[ $# -eq 0 || ${1:-} == --live ]]; then
+  cd "$(dirname "$0")/.."
+  case "${BOS_NIC:-rtl8139}" in
+    rtl8139|e1000|e1000e) live_net=(-netdev user,id=lan -device "${BOS_NIC:-rtl8139},netdev=lan,romfile=") ;;
+    none) live_net=(-nic none) ;;
+    *) echo "Unknown Ethernet device: $BOS_NIC" >&2; exit 2 ;;
+  esac
+  live_data=()
+  if [[ -n "${BOS_DATA:-}" ]]; then
+    [[ -f "$BOS_DATA" ]] || { echo "Data image not found: $BOS_DATA" >&2; exit 1; }
+    live_data=(-drive "if=none,id=users,format=raw,file=$BOS_DATA" -device virtio-blk-pci,disable-modern=on,drive=users)
+  fi
+  accel=${BOS_ACCEL:-auto}
+  if [[ "$accel" == auto ]]; then
+    if [[ -r /dev/kvm && -w /dev/kvm ]]; then accel=kvm; else accel=tcg; fi
+  fi
+  if [[ "$accel" == kvm ]]; then cpu=host; else cpu=max,vendor=GenuineIntel; fi
+  exec qemu-system-x86_64 -machine pc -accel "$accel" -cpu "${BOS_CPU:-$cpu}" -smp 1 -m "${BOS_MEMORY:-1G}" -device VGA,vgamem_mb=8 \
+    -drive file=target/live/bos-live.img,format=raw,if=none,id=stick,readonly=on \
+    -device qemu-xhci -device usb-storage,drive=stick,bootindex=1 \
+    "${live_net[@]}" "${live_data[@]}" \
+    -serial stdio -boot c "${@:2}"
+fi
+if [[ ${1:-} == --full ]]; then shift; fi
 # bOS: run in QEMU (UEFI via OVMF). Usage: run-qemu.sh [esp-dir] [users.img]
 ESP="${1:-target/esp}"
 OVMF_CODE="${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
@@ -30,8 +54,10 @@ if [[ -n "$DATA_DISK" ]]; then
     *) echo "Unsupported BOS_STORAGE" >&2; exit 2 ;;
   esac
 fi
-exec qemu-system-x86_64 \
-  -machine q35 -cpu "${BOS_CPU:-max}" -smp 4 -m "$MEMORY" \
+ACCEL_ARGS=()
+if [[ -n "${BOS_ACCEL:-}" ]]; then ACCEL_ARGS=(-accel "$BOS_ACCEL"); fi
+exec qemu-system-x86_64 "${ACCEL_ARGS[@]}" \
+  -machine q35 -cpu "${BOS_CPU:-max,vendor=GenuineIntel}" -smp 4 -m "$MEMORY" \
   -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
   -drive file=fat:rw:"$ESP",format=raw,if=none,id=esp \
   -device ide-hd,drive=esp,bootindex=0 \

@@ -198,11 +198,10 @@ fn enable_paging_features() {
 
     // Enable SMEP (Supervisor Mode Execution Prevention) and SMAP (Supervisor Mode Access Prevention)
     unsafe {
+        let supported = core::arch::x86_64::__cpuid_count(7, 0).ebx;
         Cr4::update(|cr4| {
-            cr4.insert(
-                Cr4Flags::SUPERVISOR_MODE_EXECUTION_PROTECTION
-                    | Cr4Flags::SUPERVISOR_MODE_ACCESS_PREVENTION,
-            );
+            if supported & (1 << 7) != 0 { cr4.insert(Cr4Flags::SUPERVISOR_MODE_EXECUTION_PROTECTION); }
+            if supported & (1 << 20) != 0 { cr4.insert(Cr4Flags::SUPERVISOR_MODE_ACCESS_PREVENTION); }
         });
     }
 
@@ -213,7 +212,7 @@ fn enable_paging_features() {
         });
     }
 
-    info!("Paging features enabled: NX, SMEP, SMAP, WP");
+    info!("Paging features enabled: NX, WP, CR4={:?}", Cr4::read());
 }
 
 /// Map a virtual page to a physical frame
