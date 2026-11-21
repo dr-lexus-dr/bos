@@ -112,11 +112,18 @@ def efi_partition(program, notice):
         result = bytearray(32)
         result[:11] = name.encode("ascii").ljust(11)
         result[11] = 16 if directory else 32
+        # Reproducible FAT timestamp, 1980-01-01 at midnight.
+        for offset in (16, 18, 24):
+            struct.pack_into("<H", result, offset, 0x21)
         struct.pack_into("<HI", result, 26, cluster, size)
         return result
 
-    root = entry("EFI", True, 2) + entry(
-        "NOTICES TXT", False, 4 + file_clusters, len(notice)
+    label = entry("BOS LIVE", False, 0)
+    label[11] = 0x08
+    root = (
+        label
+        + entry("EFI", True, 2)
+        + entry("NOTICES TXT", False, 4 + file_clusters, len(notice))
     )
     efi = entry(".", True, 2) + entry("..", True, 0) + entry("BOOT", True, 3)
     folder = (
