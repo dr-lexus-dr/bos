@@ -1,43 +1,17 @@
-# Install bOS · Установка bOS
+# Boot bOS
 
 ## English
 
-The **Live ISO** boots bSH directly in a virtual machine or from an optical disc. The **Install ISO** also boots bSH and contains a Linux installer that prepares a dedicated USB drive or disk for UEFI boot. Run the installer from a Linux session.
+The bOS 1.0 release ships a raw x86-64 disk image. Download it with `SHA256SUMS`, verify it with `sha256sum -c SHA256SUMS`, and boot the image in QEMU or write it to a USB stick with a disk-image writer. Writing an image replaces the contents of the selected stick. Choose the stick in the BIOS or UEFI boot menu. For an unsigned UEFI image, use a machine that permits booting it with Secure Boot disabled. The desktop opens in English. [Download](https://github.com/dr-lexus-dr/bOS/releases/tag/v1.0.0) · [QEMU command, supported hardware and storage](../README.md)
 
-Release assets are produced with `bash scripts/release.sh`; a local plain build writes `target/bos-live.iso` and `target/bos-install.iso`.
+Files live in RAM unless a separate bFS users volume or a FAT12/FAT16 volume labelled `BOSDATA` is attached. The boot medium itself can stay read-only.
 
-1. Download the Install ISO and `SHA256SUMS` into the same directory. Verify the download with `sha256sum --ignore-missing -c SHA256SUMS`.
-2. Connect an empty drive. Use `lsblk -d -o NAME,SIZE,MODEL,TRAN` to identify the whole device. The installer **erases the entire selected drive**. Unmount its partitions first.
-3. Install the Linux packages providing `sfdisk` and `mkfs.vfat` (on Debian and Ubuntu, `fdisk` and `dosfstools`). Mount the ISO and run its installer. Replace `/dev/sdX` with the actual drive.
-
-   ```sh
-   sudo mkdir -p /mnt/bos-install
-   sudo mount -o loop,ro bos-0.6.0-x86_64-install.iso /mnt/bos-install
-   sudo bash /mnt/bos-install/install.sh /dev/sdX
-   sudo umount /mnt/bos-install
-   ```
-
-4. Boot the drive from the firmware's UEFI boot menu with Secure Boot disabled. At the bSH prompt, try `help`, `whoami` and `ls /`.
-
-The installer writes a GPT partition table and a FAT32 EFI System Partition. A physical boot uses a RAM session. For persistent files, use a separate bFS data disk in QEMU as described in the [README](../README.md#save-files-between-reboots).
+For the optional full UEFI development profile, `bash scripts/release.sh --full 1.0.0` builds the live disk, the full Live and Install ISOs and an ESP archive. All files appear in `target/release-1.0.0/`. The optional Install ISO includes a Linux script for preparing a dedicated UEFI drive. [Full build and userspace](UPSTREAM-USERSPACE.md)
 
 ## Русский
 
-**Live ISO** загружает bSH в виртуальной машине или с оптического диска. **Install ISO** также загружает bSH и содержит скрипт для подготовки отдельной флешки или диска с загрузкой UEFI. Скрипт запускается из Linux.
+В релизе bOS 1.0 доступен raw-образ диска для x86-64. Скачайте образ и `SHA256SUMS`, выполните `sha256sum -c SHA256SUMS` и откройте образ в QEMU либо запишите его на флешку как образ диска. Запись заменяет содержимое выбранной флешки. Выберите её в меню загрузки BIOS или UEFI. Для неподписанного образа UEFI компьютер должен допускать загрузку с отключённым Secure Boot. Рабочий стол открывается на английском. Для переключения на русский нажмите **EN** в верхней панели. [Скачать](https://github.com/dr-lexus-dr/bOS/releases/tag/v1.0.0) · [Команда QEMU и требования к оборудованию](../README.ru.md)
 
-Релизные файлы собираются командой `bash scripts/release.sh`; обычная локальная сборка создаёт `target/bos-live.iso` и `target/bos-install.iso`.
+Файлы хранятся в ОЗУ. Чтобы сохранить их между загрузками, подключите отдельный том bFS либо FAT12/FAT16 с меткой `BOSDATA`. Загрузочную флешку можно оставить в режиме чтения.
 
-1. Скачайте Install ISO и `SHA256SUMS` в одну папку. Проверьте скачанный образ командой `sha256sum --ignore-missing -c SHA256SUMS`.
-2. Подключите пустой накопитель и найдите его через `lsblk -d -o NAME,SIZE,MODEL,TRAN`. Скрипт **стирает весь выбранный диск**. Сначала размонтируйте его разделы.
-3. Установите пакеты с `sfdisk` и `mkfs.vfat` (в Debian и Ubuntu это `fdisk` и `dosfstools`). Смонтируйте ISO и запустите скрипт. Вместо `/dev/sdX` укажите путь к накопителю целиком.
-
-   ```sh
-   sudo mkdir -p /mnt/bos-install
-   sudo mount -o loop,ro bos-0.6.0-x86_64-install.iso /mnt/bos-install
-   sudo bash /mnt/bos-install/install.sh /dev/sdX
-   sudo umount /mnt/bos-install
-   ```
-
-4. Отключите Secure Boot и выберите накопитель в меню загрузки UEFI. В bSH попробуйте команды `help`, `whoami` и `ls /`.
-
-Скрипт создаёт таблицу GPT и системный раздел EFI в FAT32. При загрузке на физическом компьютере сеанс работает в RAM. Постоянный диск bFS поддерживается в QEMU. См. [инструкцию](../README.md#постоянный-диск-bfs).
+Для расширенной UEFI-сборки выполните `bash scripts/release.sh --full 1.0.0`. В `target/release-1.0.0/` появятся Live-диск, образы Live и Install ISO и архив загрузочного раздела ESP. В Install ISO есть Linux-скрипт для подготовки выделенного UEFI-диска. [Расширенная сборка](UPSTREAM-USERSPACE.md)
